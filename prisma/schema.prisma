@@ -1,0 +1,336 @@
+datasource db {
+  provider = "mysql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum TxType {
+  INCOME
+  EXPENSE
+  INVESTMENT
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  RESTORE
+  CURRENCY_CHANGE
+  TRANSFER_CREATE
+  MEMBER_ADD
+  MEMBER_REMOVE
+  LOGIN
+  LOGOUT
+}
+
+enum AssetType {
+  STOCK
+  ETF
+  INDEX
+  CRYPTO
+  FOREX
+  FUTURE
+  COMMODITY
+  BOND
+  FUND
+  OTHER
+}
+
+enum MarketDataProvider {
+  TWELVEDATA
+  FINNHUB
+  POLYGON
+  ALPHAVANTAGE
+  OTHER
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  displayName  String?
+  /// Ledger created at signup (“Personal”); members cannot be added to this book.
+  personalAccountId String? @unique
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  /// Soft-delete: user cannot sign in; data retained for audit.
+  deletedAt    DateTime?
+
+  memberships     AccountMember[]
+  sessions          Session[]
+  audits            AuditLog[]
+  personalAccount   Account? @relation("UserPersonalAccount", fields: [personalAccountId], references: [id], onDelete: SetNull)
+
+  // ✅ FIX: add relation name + add the other missing opposite relations
+  initiatedTransfers  TransferGroup[]         @relation("InitiatedTransfers")
+  createdTransactions Transaction[]           @relation("TxCreatedBy")
+  currencyChanges     AccountCurrencyChange[] @relation("CurrencyChangedBy")
+
+  @@index([deletedAt])
+}
+
+model Session {
+  id               String    @id @default(cuid())
+  userId           String
+  refreshTokenHash String
+  userAgent        String?
+  ip               String?
+  revokedAt        DateTime?
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Account {
+  id        String    @id @default(cuid())
+  name      String
+  currency  String    @default("EUR")
+  /// When false, investment UI and flows are hidden; no holdings may remain before turning off.
+  investingEnabled Boolean @default(true)
+  isBusiness Boolean  @default(false)
+  companyName      String? @db.VarChar(200)
+  companyLegalName String? @db.VarChar(200)
+  companyTaxId     String? @db.VarChar(80)
+  companyAddress   String? @db.Text
+  companyNotes     String? @db.Text
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  members        AccountMember[]
+  categories     Category[]
+  transactions   Transaction[]
+  currencyEvents AccountCurrencyChange[]
+  holdings       Holding[]
+
+  transfersFrom TransferGroup[] @relation("FromAccount")
+  transfersTo   TransferGroup[] @relation("ToAccount")
+  userPersonalFor User[]          @relation("UserPersonalAccount")
+
+  @@index([createdAt])
+  @@index([deletedAt])
+}
+
+model AccountMember {
+  userId    String
+  accountId String
+  role      MemberRole @default(MEMBER)
+  joinedAt  DateTime   @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@id([userId, accountId])
+  @@index([accountId])
+}
+
+model Category {
+  id        String    @id @default(cuid())
+  accountId String
+  type      TxType?
+  name      String
+  /// System use: e.g. INV_STOCKS, CASH_OUT_INVESTMENT. Omitted for user-created categories.
+  internalKey String? @db.VarChar(64)
+  icon      String?
+  color     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  account      Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+  holdings     Holding[]
+  wishlistItems CategoryWishlistItem[]
+
+  @@unique([accountId, type, name])
+  @@index([accountId])
+  @@index([deletedAt])
+}
+
+model TransferGroup {
+  id            String    @id @default(cuid())
+  initiatedById String
+  fromAccountId String
+  toAccountId   String
+  fxRate        Decimal?  @db.Decimal(18, 8)
+  note          String?
+  createdAt     DateTime  @default(now())
+  deletedAt     DateTime?
+
+  // ✅ FIX: relation name matches User.initiatedTransfers
+  initiatedBy User @relation("InitiatedTransfers", fields: [initiatedById], references: [id], onDelete: Restrict)
+
+  fromAccount Account @relation("FromAccount", fields: [fromAccountId], references: [id], onDelete: Restrict)
+  toAccount   Account @relation("ToAccount", fields: [toAccountId], references: [id], onDelete: Restrict)
+
+  transactions Transaction[]
+
+  @@index([fromAccountId, createdAt])
+  @@index([toAccountId, createdAt])
+  @@index([deletedAt])
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  accountId   String
+  type        TxType
+  amountMinor Int
+  currency    String
+  occurredAt  DateTime
+  note        String?
+
+  categoryId      String?
+  createdByUserId String?
+  transferGroupId String?
+  instrumentId    String?
+  /// Units acquired on this INVESTMENT row (used to reverse holdings on revoke).
+  investmentQuantity Decimal? @db.Decimal(36, 18)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  /// When set, excluded from balances and wheel; still listed in history until hard-deleted.
+  revokedAt DateTime?
+
+  account  Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  // ✅ FIX: give this relation a name and match User.createdTransactions
+  createdBy User? @relation("TxCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  transferGroup TransferGroup? @relation(fields: [transferGroupId], references: [id], onDelete: SetNull)
+
+  instrument Instrument? @relation(fields: [instrumentId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, occurredAt])
+  @@index([categoryId])
+  @@index([createdByUserId])
+  @@index([transferGroupId])
+  @@index([instrumentId])
+  @@index([deletedAt])
+  @@index([accountId, revokedAt])
+}
+
+model AccountCurrencyChange {
+  id          String   @id @default(cuid())
+  accountId   String
+  changedById String
+  oldCurrency String
+  newCurrency String
+  // "1 oldCurrency = fxRate newCurrency"
+  fxRate      Decimal  @db.Decimal(18, 8)
+  changedAt   DateTime @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  // ✅ FIX: relation name matches User.currencyChanges
+  changedBy User @relation("CurrencyChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
+
+  @@index([accountId, changedAt])
+}
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  userId    String?
+  action    AuditAction
+  entity    String
+  entityId  String?
+  meta      Json?
+  createdAt DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([action, createdAt])
+  @@index([entity, entityId])
+}
+
+/// ---------- Investments v1 (Holdings only) ----------
+
+model Instrument {
+  id             String             @id @default(cuid())
+  provider       MarketDataProvider
+  providerSymbol String
+  name           String
+  type           AssetType
+  currency       String?
+  exchange       String             @default("")
+  country        String?
+  isActive       Boolean            @default(true)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  holdings     Holding[]
+  quotes       QuoteCache[]
+  transactions Transaction[]
+  wishlistItems CategoryWishlistItem[]
+
+  @@unique([provider, providerSymbol, exchange])
+  @@index([type])
+  @@index([isActive])
+}
+
+model Holding {
+  id           String    @id @default(cuid())
+  accountId    String
+  instrumentId String
+  categoryId   String?
+  quantity     Decimal   @db.Decimal(36, 18)
+  /// Sum of amountMinor from buys still reflected in this holding (account currency, minor units).
+  costBasisMinor Int       @default(0)
+  note         String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  account    Account    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Restrict)
+  category   Category?  @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@unique([accountId, instrumentId])
+  @@index([accountId])
+  @@index([instrumentId])
+  @@index([categoryId])
+  @@index([deletedAt])
+}
+
+model QuoteCache {
+  id           String             @id @default(cuid())
+  instrumentId String
+  provider     MarketDataProvider
+  price        Decimal            @db.Decimal(18, 8)
+  currency     String?
+  asOf         DateTime
+  createdAt    DateTime           @default(now())
+
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+
+  @@index([instrumentId, asOf])
+  @@index([provider, asOf])
+}
+
+/// Saved instruments per INVESTMENT category (wishlist) for quick pick when logging buys.
+model CategoryWishlistItem {
+  id           String   @id @default(cuid())
+  categoryId   String
+  instrumentId String
+  createdAt    DateTime @default(now())
+
+  category   Category   @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+
+  @@unique([categoryId, instrumentId])
+  @@index([categoryId])
+  @@index([instrumentId])
+}

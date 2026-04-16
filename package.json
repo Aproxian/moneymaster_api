@@ -1,0 +1,36 @@
+{
+  "name": "moneymaster",
+  "version": "1.0.0",
+  "description": "API for mobile app MoneyMASTER",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Aproxian/moneymaster_api.git"
+  },
+  "license": "ISC",
+  "author": "Aproxian Web & Digital",
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev"
+  },
+  "dependencies": {
+    "@prisma/adapter-mariadb": "^7.4.2",
+    "@prisma/client": "^7.4.1",
+    "bcrypt": "^6.0.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "node-fetch": "^2.7.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@prisma/config": "^7.4.2",
+    "prisma": "^7.4.1"
+  }
+}
