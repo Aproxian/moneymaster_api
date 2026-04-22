@@ -21,8 +21,8 @@ async function processPendingSchedulesForUser(userId) {
         members: { some: { userId } },
       },
       OR: [
-        { kind: "DELAY_ONCE", executeAt: { lte: now } } },
-        { kind: "RECURRING", nextRunAt: { lte: now } } },
+        { kind: "DELAY_ONCE", executeAt: { lte: now } } ,
+        { kind: "RECURRING", nextRunAt: { lte: now } } ,
       ],
     },
     orderBy: [{ nextRunAt: "asc" }, { createdAt: "asc" }],
