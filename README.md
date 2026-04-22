@@ -35,7 +35,26 @@ REST API for the **MoneyMASTER** mobile app: multi-account ledgers, categories, 
 
    See **QUICKSTART_PRISMA.md** for a fuller variable list (Twelve Data, optional `PORT`, `ADMIN_EMAIL`, etc.).
 
-4. **Database**
+   *Example*
+   ```bash
+   DATABASE_URL="mysql://username:password@host:port/dbname"
+   JWT_ACCESS_SECRET="SECRET"
+   JWT_REFRESH_SECRET="SECRETER"
+   PRISMA_CLIENT_ENGINE_TYPE=binary
+   NODE_ENV="development" (NODE_ENV="production")
+   
+   DATABASE_HOST=host
+   DATABASE_PORT=port
+   DATABASE_NAME=db_name
+   DATABASE_USER=username
+   DATABASE_PASSWORD=db_pass
+   
+   ADMIN_EMAIL="youremail@mail.com"
+   TWELVEDATA_API_KEY="twelvedata_key_api"
+   TWELVEDATA_BASE_URL="https://api.twelvedata.com"
+   ```
+
+5. **Database**
 
    Create the database (e.g. `moneymaster_dev`), then:
 
@@ -46,7 +65,7 @@ REST API for the **MoneyMASTER** mobile app: multi-account ledgers, categories, 
 
    For local iteration you can use `npm run prisma:migrate` (`prisma migrate dev`) instead of `deploy`.
 
-5. **Run**
+6. **Run**
 
    ```bash
    npm start
