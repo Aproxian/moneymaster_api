@@ -1,0 +1,8 @@
+---
+# cPanel “Manage repositories” → Deploy from remote.
+# Runs from the clone directory; copies into the live app path (adjust DEPLOYPATH if needed).
+# Does not use --delete: server-only files (.env, node_modules, tmp/) in DEPLOYPATH are left alone.
+deployment:
+  tasks:
+    - export DEPLOYPATH=/home/nr5g65lkcc5a/api.aproxian.com/moneymaster
+    - /bin/rsync -a ./ "$DEPLOYPATH/"
