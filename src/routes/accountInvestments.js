@@ -15,6 +15,7 @@ const createInvestmentSchema = z.object({
   quantity: z.number().positive(),
   occurredAt: z.coerce.date().optional(),
   note: z.string().max(500).optional(),
+  walletId: z.string().min(1).optional(),
 });
 
 accountInvestmentsRouter.use(requireAuth);
@@ -29,7 +30,7 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, currency: true, investingEnabled: true },
+      select: { id: true, currency: true, investingEnabled: true, walletsEnabled: true },
     });
 
     if (!account) {
@@ -75,6 +76,20 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
       });
     }
 
+    let walletId = body.walletId ?? null;
+    if (account.walletsEnabled) {
+      if (!walletId) {
+        return res.status(400).json({ error: "walletId is required when wallets are enabled" });
+      }
+      const w = await prisma.accountWallet.findFirst({
+        where: { id: walletId, accountId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!w) return res.status(400).json({ error: "Invalid walletId for this account" });
+    } else if (walletId) {
+      return res.status(400).json({ error: "walletId is only allowed when wallets are enabled" });
+    }
+
     // For now we assume instrument prices and account currency match,
     // so no FX is applied at this layer.
     const occurredAt = body.occurredAt ?? new Date();
@@ -92,6 +107,7 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
           createdByUserId: userId,
           instrumentId: instrument.id,
           investmentQuantity: body.quantity,
+          walletId,
         },
         select: {
           id: true,

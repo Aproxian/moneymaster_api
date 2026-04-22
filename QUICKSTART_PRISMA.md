@@ -14,10 +14,10 @@ When you change `schema.prisma`, you run a migration, then Prisma generates an u
 
 ## Setup
 
-1) Put your database connection string in **`.env`**:
+1) Put your database connection string in **`.env`** (this app uses **MySQL / MariaDB**):
 
 ```env
-DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DBNAME"
+DATABASE_URL="mysql://USER:PASSWORD@HOST:3306/DBNAME"
 ```
 
 2) Install dependencies:
@@ -26,40 +26,70 @@ DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DBNAME"
 npm install
 ```
 
-2) Add the MySQL connection details and Prisma config variables:
+3) Add the rest of the runtime DB fields and secrets to **`.env`** (same file as step 1):
 
 ```env
-DATABASE_URL="mysql://USER:PASSWORD@HOST:3306/DBNAME"
-DATABASE_HOST=localhost
+DATABASE_HOST=127.0.0.1
 DATABASE_PORT=3306
 DATABASE_NAME=DBNAME
 DATABASE_USER=USER
 DATABASE_PASSWORD=PASSWORD
 
-# JWT secrets for auth
 JWT_ACCESS_SECRET="change_me"
 JWT_REFRESH_SECRET="change_me_too"
 
-# Twelve Data (market data) API key and optional base URL
 TWELVEDATA_API_KEY="your_api_key_here"
-# TWELVEDATA_BASE_URL="https://api.twelvedata.com"
-
-# Optional: email allowed to trigger /investments/refresh-daily
 # ADMIN_EMAIL="you@example.com"
 ```
 
-3) Create/update your database tables + generate the Prisma client:
+4) **Local / CI:** create migrations and apply them to your dev DB:
 
 ```bash
 npm run prisma:migrate
 ```
 
-This will also run `prisma generate`.
+5) **Production server:** apply existing migrations (does not create new migration files):
+
+```bash
+npm run prisma:migrate:deploy
+```
+
+6) Generate the Prisma client (if `migrate deploy` did not already run it):
+
+```bash
+npm run prisma:generate
+```
+
+## Shared hosting (cPanel / CloudLinux) — WASM “Out of memory”
+
+If `npm run prisma:migrate:deploy` or `npm run prisma:generate` fails with:
+
+`RangeError: WebAssembly.Instance(): Out of memory: Cannot allocate Wasm memory for new instance`
+
+then the **Prisma CLI is not broken** — the **host is capping RAM** for that process (CloudLinux **LVE** / “Max cPanel process memory”). Prisma 7’s CLI loads WebAssembly engines that need more headroom than many shared plans allow.
+
+**What works in practice:**
+
+1. **Ask the host** to raise **Max cPanel process memory** / LVE memory for your user (some panels expose this; often only support can change it).
+
+2. **Run Prisma off the server**, point `DATABASE_URL` at the same production MySQL (host must allow remote connections + your IP), then upload the app **including** a Linux-generated `node_modules` (see below):
+   - On your PC: `npm run prisma:migrate:deploy` and `npm run prisma:generate` with prod `DATABASE_URL`.
+   - **Important:** generated **engine binaries** are OS-specific. If your laptop is **Windows**, run `migrate deploy` / `generate` in **WSL**, **Docker (Linux)**, or **GitHub Actions `ubuntu-latest`**, then deploy that `node_modules` tree (or at least `node_modules/.prisma`, `node_modules/@prisma/client`, and `node_modules/@prisma/engines` as produced on Linux).
+
+3. **Use a VPS** or a plan without strict per-process WASM limits if you need the CLI to always run on the server.
+
+`cross-env NODE_OPTIONS= …` does **not** fix this class of error; it is **WASM / cgroup memory**, not the old `NODE_OPTIONS` string bug.
 
 ## Run the API
 
 ```bash
 npm run dev
+```
+
+Production:
+
+```bash
+npm start
 ```
 
 ## Where Prisma is used in the code
@@ -79,12 +109,15 @@ await prisma.user.findUnique({ where: { email } });
 ## Common Prisma commands
 
 ```bash
-# Create a new migration after changing schema.prisma
-npx prisma migrate dev
+# Create a new migration after changing schema.prisma (dev machine)
+npm run prisma:migrate
 
-# Just regenerate the client (if needed)
-npx prisma generate
+# Apply migrations on production
+npm run prisma:migrate:deploy
 
-# Open a DB UI
+# Regenerate client
+npm run prisma:generate
+
+# Open a DB UI (local only)
 npx prisma studio
 ```

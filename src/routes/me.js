@@ -1,15 +1,23 @@
 const { Router } = require("express");
 const { z } = require("zod");
+const bcrypt = require("bcrypt");
 
 const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
 const { isAdminUserEmail } = require("../lib/adminUser");
+const { processPendingSchedulesForUser } = require("../services/processPendingSchedules");
 
 const meRouter = Router();
 
 const patchMeSchema = z.object({
   displayName: z.string().max(80).optional(),
   email: z.string().email().max(255).optional(),
+  firstDayOfWeek: z.number().int().min(0).max(6).optional(),
+});
+
+const lockPairSchema = z.object({
+  password: z.string().min(4).max(200),
+  confirmPassword: z.string().min(4).max(200),
 });
 
 meRouter.get("/me", requireAuth, async (req, res) => {
@@ -24,6 +32,8 @@ meRouter.get("/me", requireAuth, async (req, res) => {
       displayName: true,
       createdAt: true,
       personalAccountId: true,
+      firstDayOfWeek: true,
+      appLockEnabled: true,
     },
   });
 
@@ -74,6 +84,7 @@ meRouter.patch("/me", requireAuth, async (req, res, next) => {
       data.displayName = t.length ? t : null;
     }
     if (body.email !== undefined) data.email = body.email.trim().toLowerCase();
+    if (body.firstDayOfWeek !== undefined) data.firstDayOfWeek = body.firstDayOfWeek;
 
     const user = await prisma.user.update({
       where: { id: userId },
@@ -84,9 +95,117 @@ meRouter.patch("/me", requireAuth, async (req, res, next) => {
         displayName: true,
         createdAt: true,
         personalAccountId: true,
+        firstDayOfWeek: true,
+        appLockEnabled: true,
       },
     });
 
+    return res.json({
+      user: {
+        ...user,
+        isAdmin: isAdminUserEmail(user.email),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+meRouter.post("/me/process-schedules", requireAuth, async (req, res, next) => {
+  try {
+    await processPendingSchedulesForUser(req.auth.userId);
+    return res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+meRouter.post("/me/app-lock/verify", requireAuth, async (req, res, next) => {
+  try {
+    const body = z.object({ password: z.string().min(4).max(200) }).parse(req.body);
+    const u = await prisma.user.findFirst({
+      where: { id: req.auth.userId, deletedAt: null },
+      select: { appLockEnabled: true, appLockPasswordHash: true },
+    });
+    if (!u?.appLockEnabled || !u.appLockPasswordHash) {
+      return res.status(400).json({ error: "App lock is not enabled" });
+    }
+    const ok = await bcrypt.compare(body.password, u.appLockPasswordHash);
+    if (!ok) return res.status(401).json({ error: "Invalid app lock password" });
+    return res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+meRouter.post("/me/app-lock/enable", requireAuth, async (req, res, next) => {
+  try {
+    const body = lockPairSchema.parse(req.body);
+    if (body.password !== body.confirmPassword) {
+      return res.status(400).json({ error: "Passwords do not match" });
+    }
+    const u = await prisma.user.findFirst({
+      where: { id: req.auth.userId, deletedAt: null },
+      select: { id: true, appLockEnabled: true },
+    });
+    if (!u) return res.status(401).json({ error: "Unauthorized" });
+    if (u.appLockEnabled) {
+      return res.status(400).json({ error: "App lock is already enabled" });
+    }
+    const appLockPasswordHash = await bcrypt.hash(body.password, 12);
+    const user = await prisma.user.update({
+      where: { id: u.id },
+      data: { appLockEnabled: true, appLockPasswordHash },
+      select: {
+        id: true,
+        email: true,
+        displayName: true,
+        createdAt: true,
+        personalAccountId: true,
+        firstDayOfWeek: true,
+        appLockEnabled: true,
+      },
+    });
+    return res.json({
+      user: {
+        ...user,
+        isAdmin: isAdminUserEmail(user.email),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+meRouter.post("/me/app-lock/disable", requireAuth, async (req, res, next) => {
+  try {
+    const body = lockPairSchema.parse(req.body);
+    if (body.password !== body.confirmPassword) {
+      return res.status(400).json({ error: "Passwords do not match" });
+    }
+    const u = await prisma.user.findFirst({
+      where: { id: req.auth.userId, deletedAt: null },
+      select: { id: true, appLockEnabled: true, appLockPasswordHash: true },
+    });
+    if (!u) return res.status(401).json({ error: "Unauthorized" });
+    if (!u.appLockEnabled || !u.appLockPasswordHash) {
+      return res.status(400).json({ error: "App lock is not enabled" });
+    }
+    const ok = await bcrypt.compare(body.password, u.appLockPasswordHash);
+    if (!ok) return res.status(401).json({ error: "Invalid app lock password" });
+    const user = await prisma.user.update({
+      where: { id: u.id },
+      data: { appLockEnabled: false, appLockPasswordHash: null },
+      select: {
+        id: true,
+        email: true,
+        displayName: true,
+        createdAt: true,
+        personalAccountId: true,
+        firstDayOfWeek: true,
+        appLockEnabled: true,
+      },
+    });
     return res.json({
       user: {
         ...user,

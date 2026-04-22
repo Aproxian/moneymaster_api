@@ -10,6 +10,7 @@ const {
   ensureInvestmentCategories,
   removeInvestmentCategories,
 } = require("../services/investingCategories");
+const { seedDefaultWallets } = require("../services/seedDefaultWallets");
 
 const accountsRouter = Router();
 
@@ -27,6 +28,7 @@ const createAccountSchema = z.object({
 
 const patchAccountSchema = z.object({
   name: z.string().min(1).max(120).optional(),
+  walletsEnabled: z.boolean().optional(),
   investingEnabled: z.boolean().optional(),
   isBusiness: z.boolean().optional(),
   companyName: z.string().max(200).optional().nullable(),
@@ -71,6 +73,7 @@ accountsRouter.get("/", async (req, res, next) => {
         name: true,
         currency: true,
         investingEnabled: true,
+        walletsEnabled: true,
         isBusiness: true,
         companyName: true,
         createdAt: true,
@@ -92,6 +95,7 @@ accountsRouter.get("/", async (req, res, next) => {
         name: a.name,
         currency: a.currency,
         investingEnabled: a.investingEnabled,
+        walletsEnabled: a.walletsEnabled,
         isBusiness: a.isBusiness,
         companyName: a.companyName,
         createdAt: a.createdAt,
@@ -329,6 +333,7 @@ accountsRouter.patch(
 
       const data = {};
       if (body.name !== undefined) data.name = body.name.trim();
+      if (body.walletsEnabled !== undefined) data.walletsEnabled = body.walletsEnabled;
       if (body.investingEnabled !== undefined) data.investingEnabled = body.investingEnabled;
       if (body.isBusiness !== undefined) data.isBusiness = body.isBusiness;
       if (body.companyName !== undefined) data.companyName = body.companyName?.trim() || null;
@@ -358,6 +363,7 @@ accountsRouter.patch(
             name: true,
             currency: true,
             investingEnabled: true,
+            walletsEnabled: true,
             isBusiness: true,
             companyName: true,
             companyLegalName: true,
@@ -374,6 +380,10 @@ accountsRouter.patch(
         }
         if (body.investingEnabled === true && !existing.investingEnabled) {
           await ensureInvestmentCategories(tx, accountId);
+        }
+
+        if (body.walletsEnabled === true) {
+          await seedDefaultWallets(tx, accountId);
         }
 
         return updated;
@@ -403,6 +413,7 @@ accountsRouter.get("/:accountId", requireAccountMember("accountId"), async (req,
         name: true,
         currency: true,
         investingEnabled: true,
+        walletsEnabled: true,
         isBusiness: true,
         companyName: true,
         companyLegalName: true,
@@ -411,15 +422,28 @@ accountsRouter.get("/:accountId", requireAccountMember("accountId"), async (req,
         companyNotes: true,
         createdAt: true,
         updatedAt: true,
+        wallets: {
+          where: { deletedAt: null },
+          orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+          select: {
+            id: true,
+            emoji: true,
+            sortOrder: true,
+            internalKey: true,
+            createdAt: true,
+          },
+        },
       },
     });
 
     if (!account) return res.status(404).json({ error: "Account not found" });
 
     const personalId = me?.personalAccountId ?? null;
+    const { wallets, ...rest } = account;
     return res.json({
       account: {
-        ...account,
+        ...rest,
+        wallets,
         isPersonal: personalId != null && account.id === personalId,
         myRole: req.memberRole,
       },
@@ -438,10 +462,27 @@ accountsRouter.get(
 
       const account = await prisma.account.findFirst({
         where: { id: accountId, deletedAt: null },
-        select: { id: true, name: true, currency: true, investingEnabled: true },
+        select: { id: true, name: true, currency: true, investingEnabled: true, walletsEnabled: true },
       });
 
       if (!account) return res.status(404).json({ error: "Account not found" });
+
+      const walletIdRaw =
+        typeof req.query.walletId === "string" && req.query.walletId.trim()
+          ? req.query.walletId.trim()
+          : undefined;
+      let walletIdFilter = undefined;
+      if (walletIdRaw) {
+        if (!account.walletsEnabled) {
+          return res.status(400).json({ error: "walletId filter requires wallets to be enabled" });
+        }
+        const w = await prisma.accountWallet.findFirst({
+          where: { id: walletIdRaw, accountId, deletedAt: null },
+          select: { id: true },
+        });
+        if (!w) return res.status(400).json({ error: "Invalid walletId" });
+        walletIdFilter = walletIdRaw;
+      }
 
       const fromParam = req.query.from;
       const toParam = req.query.to;
@@ -464,6 +505,7 @@ accountsRouter.get(
         accountId: account.id,
         deletedAt: null,
         revokedAt: null,
+        ...(walletIdFilter ? { walletId: walletIdFilter } : {}),
         ...(from || to
           ? {
               occurredAt: {
@@ -496,13 +538,16 @@ accountsRouter.get(
       let unrealizedPnLMinor = 0;
       const investmentPositions = [];
 
+      const period = {
+        from: from ? from.toISOString() : null,
+        to: to ? to.toISOString() : null,
+        walletId: walletIdFilter ?? null,
+      };
+
       if (!account.investingEnabled) {
         return res.json({
           account,
-          period: {
-            from: from ? from.toISOString() : null,
-            to: to ? to.toISOString() : null,
-          },
+          period,
           totals: {
             incomeMinor,
             expenseMinor,
@@ -602,10 +647,7 @@ accountsRouter.get(
 
       return res.json({
         account,
-        period: {
-          from: from ? from.toISOString() : null,
-          to: to ? to.toISOString() : null,
-        },
+        period,
         totals: {
           incomeMinor,
           expenseMinor,

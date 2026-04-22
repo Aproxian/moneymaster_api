@@ -5,6 +5,8 @@ const helmet = require("helmet");
 const { authRouter } = require("./routes/auth");
 const { meRouter } = require("./routes/me");
 const { accountsRouter } = require("./routes/accounts");
+const { accountExtrasRouter } = require("./routes/accountExtras");
+const { scheduledTransactionsRouter } = require("./routes/scheduledTransactions");
 const { transfersRouter } = require("./routes/transfers");
 const { transactionsRouter } = require("./routes/transactions");
 const { categoriesRouter } = require("./routes/categories");
@@ -27,6 +29,8 @@ console.info(
 
 app.use("/auth", authRouter);
 app.use("/accounts", accountsRouter);
+app.use("/accounts/:accountId", accountExtrasRouter);
+app.use("/accounts/:accountId/scheduled-transactions", scheduledTransactionsRouter);
 app.use("/accounts/:accountId/categories", categoriesRouter);
 app.use("/accounts/:accountId/transactions", transactionsRouter);
 app.use("/accounts/:accountId/investments", accountInvestmentsRouter);

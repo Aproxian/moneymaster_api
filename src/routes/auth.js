@@ -8,6 +8,7 @@ const { prisma } = require("../prisma");
 const { config } = require("../config");
 const { seedDefaultCategories } = require("../services/seedDefaultCategories");
 const { isAdminUserEmail } = require("../lib/adminUser");
+const { processPendingSchedulesForUser } = require("../services/processPendingSchedules");
 
 const authRouter = Router();
 
@@ -60,7 +61,13 @@ authRouter.post("/register", async (req, res, next) => {
           passwordHash,
           displayName: body.displayName ?? null,
         },
-        select: { id: true, email: true, displayName: true },
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+          firstDayOfWeek: true,
+          appLockEnabled: true,
+        },
       });
 
       const account = await tx.account.create({
@@ -115,6 +122,8 @@ authRouter.post("/register", async (req, res, next) => {
 
     const accessToken = signAccessToken(result.user.id);
 
+    await processPendingSchedulesForUser(result.user.id).catch(() => {});
+
     return res.status(201).json({
       user: {
         ...result.user,
@@ -148,6 +157,8 @@ authRouter.post("/login", async (req, res, next) => {
         passwordHash: true,
         personalAccountId: true,
         deletedAt: true,
+        firstDayOfWeek: true,
+        appLockEnabled: true,
       },
     });
 
@@ -182,12 +193,16 @@ authRouter.post("/login", async (req, res, next) => {
       },
     });
 
+    await processPendingSchedulesForUser(user.id).catch(() => {});
+
     return res.json({
       user: {
         id: user.id,
         email: user.email,
         displayName: user.displayName,
         personalAccountId: user.personalAccountId,
+        firstDayOfWeek: user.firstDayOfWeek,
+        appLockEnabled: user.appLockEnabled,
         isAdmin: isAdminUserEmail(user.email),
       },
       accessToken,
@@ -228,28 +243,33 @@ authRouter.post("/refresh", async (req, res, next) => {
     }
 
     // Rotation: revoke old session, create new session, return new refresh + access
-    const { accessToken, newRefreshToken } = await prisma.$transaction(async (tx) => {
-      await tx.session.update({
-        where: { id: session.id },
-        data: { revokedAt: new Date() },
-      });
+    const { accessToken, newRefreshToken, userId: refreshedUserId } = await prisma.$transaction(
+      async (tx) => {
+        await tx.session.update({
+          where: { id: session.id },
+          data: { revokedAt: new Date() },
+        });
 
-      const newRefreshToken = makeRefreshToken();
-      await tx.session.create({
-        data: {
+        const newRefreshToken = makeRefreshToken();
+        await tx.session.create({
+          data: {
+            userId: session.userId,
+            refreshTokenHash: sha256(newRefreshToken),
+            userAgent: req.get("user-agent") ?? null,
+            ip: req.ip ?? null,
+            expiresAt: refreshExpiryDate(),
+          },
+        });
+
+        return {
+          accessToken: signAccessToken(session.userId),
+          newRefreshToken,
           userId: session.userId,
-          refreshTokenHash: sha256(newRefreshToken),
-          userAgent: req.get("user-agent") ?? null,
-          ip: req.ip ?? null,
-          expiresAt: refreshExpiryDate(),
-        },
-      });
+        };
+      }
+    );
 
-      return {
-        accessToken: signAccessToken(session.userId),
-        newRefreshToken,
-      };
-    });
+    await processPendingSchedulesForUser(refreshedUserId).catch(() => {});
 
     return res.json({ accessToken, refreshToken: newRefreshToken });
   } catch (err) {

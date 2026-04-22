@@ -24,6 +24,17 @@ const PSEUDO_EXCHANGES = new Set([
 const BATCH_SIZE = parseInt(process.env.TWELVEDATA_QUOTE_BATCH_SIZE || "120", 10);
 /** Space HTTP calls so Basic-tier minutely limits (~8/min) are not exceeded. Lower on higher plans. */
 const BATCH_GAP_MS = parseInt(process.env.TWELVEDATA_BATCH_GAP_MS || "8000", 10);
+/** Max instruments to pull quotes for in one `/refresh-daily` call when using chunk mode (match plan credits/min). */
+const CREDITS_PER_TICK = Math.max(
+  1,
+  parseInt(process.env.TWELVEDATA_CREDITS_PER_MINUTE || "8", 10)
+);
+/** `chunk` (default): one slice per request + DB cursor. `all`: legacy full sweep in one HTTP session. */
+const REFRESH_MODE = String(process.env.TWELVEDATA_REFRESH_MODE || "chunk")
+  .trim()
+  .toLowerCase();
+
+const TWELVEDATA_STATE_ID = "TWELVEDATA";
 /** If true, retry each missed symbol with single-symbol requests (many HTTP calls — avoid on Basic). */
 const SINGLE_FALLBACK =
   String(process.env.TWELVEDATA_SINGLE_FALLBACK || "").toLowerCase() === "1" ||
@@ -274,12 +285,18 @@ async function fetchTwelveDataPrices(instruments) {
   return result;
 }
 
-async function refreshDailyQuotesForTwelveData() {
-  const instruments = await prisma.instrument.findMany({
+function instrumentDisplayLabel(i) {
+  const ex = String(i.exchange || "").trim();
+  return ex ? `${i.providerSymbol}@${ex}` : i.providerSymbol;
+}
+
+async function loadTwelveDataInstrumentsOrdered() {
+  return prisma.instrument.findMany({
     where: {
       provider: "TWELVEDATA",
       isActive: true,
     },
+    orderBy: { id: "asc" },
     select: {
       id: true,
       providerSymbol: true,
@@ -287,17 +304,22 @@ async function refreshDailyQuotesForTwelveData() {
       currency: true,
     },
   });
+}
+
+/**
+ * Legacy: fetch all instruments in one run (many API credits; OK on higher tiers).
+ */
+async function refreshDailyQuotesForTwelveDataAll() {
+  const instruments = await loadTwelveDataInstrumentsOrdered();
 
   let pricesByInstrumentId;
   try {
     pricesByInstrumentId = await fetchTwelveDataPrices(instruments);
   } catch (e) {
     if (e instanceof TwelveDataApiError) {
-      const missingSymbols = instruments.map((i) => {
-        const ex = String(i.exchange || "").trim();
-        return ex ? `${i.providerSymbol}@${ex}` : i.providerSymbol;
-      });
+      const missingSymbols = instruments.map(instrumentDisplayLabel);
       return {
+        mode: "all",
         instrumentsCount: instruments.length,
         quotesCreated: 0,
         missingSymbols,
@@ -317,8 +339,7 @@ async function refreshDailyQuotesForTwelveData() {
     for (const instrument of instruments) {
       const quote = pricesByInstrumentId[instrument.id];
       if (!quote) {
-        const ex = String(instrument.exchange || "").trim();
-        missingSymbols.push(ex ? `${instrument.providerSymbol}@${ex}` : instrument.providerSymbol);
+        missingSymbols.push(instrumentDisplayLabel(instrument));
         continue;
       }
 
@@ -337,14 +358,170 @@ async function refreshDailyQuotesForTwelveData() {
   });
 
   return {
+    mode: "all",
     instrumentsCount: instruments.length,
     quotesCreated: createdCount,
     missingSymbols,
   };
 }
 
+/**
+ * Rate-friendly: one HTTP “tick” worth of instruments per call; advance a DB cursor.
+ * Schedule the route ~once per minute (e.g. cron); full cycle ≈ ceil(n / CREDITS_PER_TICK) minutes.
+ */
+async function refreshDailyQuotesForTwelveDataChunked(options = {}) {
+  const resetCycle = Boolean(options.resetCycle);
+  const instruments = await loadTwelveDataInstrumentsOrdered();
+  const total = instruments.length;
+
+  if (total === 0) {
+    return {
+      mode: "chunk",
+      provider: "TWELVEDATA",
+      instrumentsCount: 0,
+      chunkSize: CREDITS_PER_TICK,
+      offsetStart: 0,
+      nextOffset: 0,
+      processedThisTick: 0,
+      quotesCreated: 0,
+      missingSymbols: [],
+      cycleJustCompleted: true,
+      ticksPerFullCycle: 0,
+      estimatedTicksRemainingInCycle: 0,
+      recommendedIntervalMs: 60_000,
+    };
+  }
+
+  let state = await prisma.twelveDataQuoteRefreshState.findUnique({
+    where: { id: TWELVEDATA_STATE_ID },
+  });
+
+  if (!state) {
+    state = await prisma.twelveDataQuoteRefreshState.create({
+      data: {
+        id: TWELVEDATA_STATE_ID,
+        nextOffset: 0,
+        totalSnapshot: total,
+      },
+    });
+  }
+
+  let offset = state.nextOffset;
+  if (resetCycle) {
+    offset = 0;
+  } else if (state.totalSnapshot !== total) {
+    offset = 0;
+  }
+
+  if (offset >= total) {
+    offset = 0;
+  }
+
+  const slice = instruments.slice(offset, offset + CREDITS_PER_TICK);
+  const offsetStart = offset;
+
+  let pricesByInstrumentId;
+  try {
+    pricesByInstrumentId = await fetchTwelveDataPrices(slice);
+  } catch (e) {
+    if (e instanceof TwelveDataApiError) {
+      return {
+        mode: "chunk",
+        provider: "TWELVEDATA",
+        instrumentsCount: total,
+        chunkSize: CREDITS_PER_TICK,
+        offsetStart,
+        nextOffset: offset,
+        processedThisTick: slice.length,
+        quotesCreated: 0,
+        missingSymbols: slice.map(instrumentDisplayLabel),
+        twelveDataError: {
+          code: e.code,
+          message: e.message,
+        },
+        cycleJustCompleted: false,
+        ticksPerFullCycle: Math.ceil(total / CREDITS_PER_TICK),
+        estimatedTicksRemainingInCycle: Math.ceil((total - offset) / CREDITS_PER_TICK),
+        recommendedIntervalMs: 60_000,
+        note:
+          "Cursor not advanced after Twelve Data error; retry after the window resets or raise limits.",
+      };
+    }
+    throw e;
+  }
+
+  let createdCount = 0;
+  const missingSymbols = [];
+  let nextOffset = offset + slice.length;
+  const cycleJustCompleted = nextOffset >= total;
+  if (cycleJustCompleted) {
+    nextOffset = 0;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    for (const instrument of slice) {
+      const quote = pricesByInstrumentId[instrument.id];
+      if (!quote) {
+        missingSymbols.push(instrumentDisplayLabel(instrument));
+        continue;
+      }
+
+      await tx.quoteCache.create({
+        data: {
+          instrumentId: instrument.id,
+          provider: "TWELVEDATA",
+          price: quote.price,
+          currency: quote.currency,
+          asOf: quote.asOf,
+        },
+      });
+
+      createdCount += 1;
+    }
+
+    await tx.twelveDataQuoteRefreshState.update({
+      where: { id: TWELVEDATA_STATE_ID },
+      data: {
+        nextOffset,
+        totalSnapshot: total,
+      },
+    });
+  });
+
+  const remainingAfterThisTick = Math.max(0, total - (offset + slice.length));
+
+  return {
+    mode: "chunk",
+    provider: "TWELVEDATA",
+    instrumentsCount: total,
+    chunkSize: CREDITS_PER_TICK,
+    offsetStart,
+    nextOffset,
+    processedThisTick: slice.length,
+    quotesCreated: createdCount,
+    missingSymbols,
+    cycleJustCompleted,
+    ticksPerFullCycle: Math.ceil(total / CREDITS_PER_TICK),
+    estimatedTicksRemainingInCycle: Math.ceil(remainingAfterThisTick / CREDITS_PER_TICK),
+    recommendedIntervalMs: 60_000,
+  };
+}
+
+/**
+ * @param {{ resetCycle?: boolean }} [options]
+ */
+async function refreshDailyQuotesForTwelveData(options = {}) {
+  if (REFRESH_MODE === "all") {
+    return refreshDailyQuotesForTwelveDataAll();
+  }
+  return refreshDailyQuotesForTwelveDataChunked(options);
+}
+
 module.exports = {
   TwelveDataApiError,
   fetchTwelveDataPrices,
   refreshDailyQuotesForTwelveData,
+  refreshDailyQuotesForTwelveDataChunked,
+  /** @type {number} max instruments per chunk tick (for sweep planner UIs) */
+  getTwelveDataCreditsPerTick: () => CREDITS_PER_TICK,
 };

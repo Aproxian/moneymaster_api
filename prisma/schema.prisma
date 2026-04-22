@@ -52,6 +52,25 @@ enum MarketDataProvider {
   OTHER
 }
 
+enum ScheduleKind {
+  DELAY_ONCE
+  RECURRING
+}
+
+enum ScheduleStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+}
+
+enum RecurrenceUnit {
+  HOUR
+  DAY
+  WEEK
+  MONTH
+  YEAR
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -59,6 +78,11 @@ model User {
   displayName  String?
   /// Ledger created at signup (“Personal”); members cannot be added to this book.
   personalAccountId String? @unique
+  /// First day of week for calendars: 0=Sun … 6=Sat (like JS getDay). Default 1=Monday.
+  firstDayOfWeek Int @default(1)
+  /// App-level lock after login (separate from this password field).
+  appLockEnabled       Boolean @default(false)
+  appLockPasswordHash  String? @db.VarChar(255)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   /// Soft-delete: user cannot sign in; data retained for audit.
@@ -73,6 +97,7 @@ model User {
   initiatedTransfers  TransferGroup[]         @relation("InitiatedTransfers")
   createdTransactions Transaction[]           @relation("TxCreatedBy")
   currencyChanges     AccountCurrencyChange[] @relation("CurrencyChangedBy")
+  schedulesCreated    PendingTransactionSchedule[] @relation("ScheduleCreatedBy")
 
   @@index([deletedAt])
 }
@@ -97,6 +122,8 @@ model Account {
   id        String    @id @default(cuid())
   name      String
   currency  String    @default("EUR")
+  /// When true, user splits cash flow into emoji wallets (cash/card defaults on enable).
+  walletsEnabled Boolean @default(false)
   /// When false, investment UI and flows are hidden; no holdings may remain before turning off.
   investingEnabled Boolean @default(true)
   isBusiness Boolean  @default(false)
@@ -112,15 +139,61 @@ model Account {
   members        AccountMember[]
   categories     Category[]
   transactions   Transaction[]
+  wallets        AccountWallet[]
   currencyEvents AccountCurrencyChange[]
   holdings       Holding[]
 
   transfersFrom TransferGroup[] @relation("FromAccount")
   transfersTo   TransferGroup[] @relation("ToAccount")
   userPersonalFor User[]          @relation("UserPersonalAccount")
+  pendingSchedules PendingTransactionSchedule[]
 
   @@index([createdAt])
   @@index([deletedAt])
+}
+
+model PendingTransactionSchedule {
+  id              String          @id @default(cuid())
+  accountId       String
+  createdByUserId String
+  kind            ScheduleKind
+  status          ScheduleStatus  @default(PENDING)
+  /// One-shot: when to materialize the row.
+  executeAt       DateTime?
+  recurrenceUnit  RecurrenceUnit?
+  intervalCount   Int             @default(1)
+  /// 0–23 UTC hour when unit is DAY or longer (optional for HOUR).
+  hourOfDay       Int?
+  nextRunAt       DateTime
+  lastRunAt       DateTime?
+  payload         Json
+  cancelledAt     DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  createdBy User    @relation("ScheduleCreatedBy", fields: [createdByUserId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, status, nextRunAt])
+  @@index([createdByUserId])
+}
+
+model AccountWallet {
+  id          String    @id @default(cuid())
+  accountId   String
+  emoji       String    @db.VarChar(16)
+  sortOrder   Int       @default(0)
+  /// System wallets created on enable, e.g. WALLET_CASH / WALLET_CARD.
+  internalKey String?   @db.VarChar(64)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  account      Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([accountId])
+  @@index([accountId, deletedAt])
 }
 
 model AccountMember {
@@ -194,6 +267,9 @@ model Transaction {
   categoryId      String?
   createdByUserId String?
   transferGroupId String?
+  /// Same-account wallet↔wallet legs share this id (paired INCOME+EXPENSE).
+  transferPairId  String?
+  walletId        String?
   instrumentId    String?
   /// Units acquired on this INVESTMENT row (used to reverse holdings on revoke).
   investmentQuantity Decimal? @db.Decimal(36, 18)
@@ -212,12 +288,16 @@ model Transaction {
 
   transferGroup TransferGroup? @relation(fields: [transferGroupId], references: [id], onDelete: SetNull)
 
+  wallet AccountWallet? @relation(fields: [walletId], references: [id], onDelete: SetNull)
+
   instrument Instrument? @relation(fields: [instrumentId], references: [id], onDelete: SetNull)
 
   @@index([accountId, occurredAt])
   @@index([categoryId])
   @@index([createdByUserId])
   @@index([transferGroupId])
+  @@index([transferPairId])
+  @@index([walletId])
   @@index([instrumentId])
   @@index([deletedAt])
   @@index([accountId, revokedAt])
@@ -318,6 +398,15 @@ model QuoteCache {
 
   @@index([instrumentId, asOf])
   @@index([provider, asOf])
+}
+
+/// Single-row cursor for TWELVEDATA daily quote refresh when using minute-rate-limited chunk mode.
+model TwelveDataQuoteRefreshState {
+  id            String   @id
+  nextOffset    Int      @default(0)
+  totalSnapshot Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 /// Saved instruments per INVESTMENT category (wishlist) for quick pick when logging buys.

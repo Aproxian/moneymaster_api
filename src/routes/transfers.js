@@ -17,6 +17,8 @@ const createTransferSchema = z.object({
   fxRate: z.number().positive().optional(),
   occurredAt: z.coerce.date().optional(),
   note: z.string().max(500).optional(),
+  fromWalletId: z.string().min(1).optional(),
+  toWalletId: z.string().min(1).optional(),
 });
 
 transfersRouter.use(requireAuth);
@@ -35,11 +37,11 @@ transfersRouter.post("/", async (req, res, next) => {
     const [fromAccount, toAccount] = await Promise.all([
       prisma.account.findFirst({
         where: { id: body.fromAccountId, deletedAt: null },
-        select: { id: true, currency: true },
+        select: { id: true, currency: true, walletsEnabled: true },
       }),
       prisma.account.findFirst({
         where: { id: body.toAccountId, deletedAt: null },
-        select: { id: true, currency: true },
+        select: { id: true, currency: true, walletsEnabled: true },
       }),
     ]);
 
@@ -122,6 +124,28 @@ transfersRouter.post("/", async (req, res, next) => {
       });
     }
 
+    if (body.fromWalletId) {
+      if (!fromAccount.walletsEnabled) {
+        return res.status(400).json({ error: "fromWalletId requires wallets on the source account" });
+      }
+      const w = await prisma.accountWallet.findFirst({
+        where: { id: body.fromWalletId, accountId: fromAccount.id, deletedAt: null },
+        select: { id: true },
+      });
+      if (!w) return res.status(400).json({ error: "Invalid fromWalletId" });
+    }
+
+    if (body.toWalletId) {
+      if (!toAccount.walletsEnabled) {
+        return res.status(400).json({ error: "toWalletId requires wallets on the destination account" });
+      }
+      const w = await prisma.accountWallet.findFirst({
+        where: { id: body.toWalletId, accountId: toAccount.id, deletedAt: null },
+        select: { id: true },
+      });
+      if (!w) return res.status(400).json({ error: "Invalid toWalletId" });
+    }
+
     const result = await prisma.$transaction(async (tx) => {
       const toAmountMinor = sameCurrency
         ? body.amountMinor
@@ -148,6 +172,7 @@ transfersRouter.post("/", async (req, res, next) => {
           categoryId: fromCategory.id,
           createdByUserId: userId,
           transferGroupId: transferGroup.id,
+          walletId: body.fromWalletId ?? null,
         },
       });
 
@@ -162,6 +187,7 @@ transfersRouter.post("/", async (req, res, next) => {
           categoryId: toCategory.id,
           createdByUserId: userId,
           transferGroupId: transferGroup.id,
+          walletId: body.toWalletId ?? null,
         },
       });
 

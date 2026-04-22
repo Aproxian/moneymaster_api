@@ -27,11 +27,13 @@ REST API for the **MoneyMASTER** mobile app: multi-account ledgers, categories, 
 
 3. **Configure environment**
 
-   ```bash
-   cp .env.example .env
-   ```
+   Create a `.env` file in the project root (never commit it). Set at least:
 
-   Edit `.env`: set database credentials, `DATABASE_URL` (for Prisma CLI), and strong `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` in production.
+   - `DATABASE_URL` — MySQL/MariaDB URL for Prisma CLI (`mysql://USER:PASSWORD@HOST:3306/DBNAME`)
+   - `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_NAME` — used at runtime by the API
+   - `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` — use long random values in production
+
+   See **QUICKSTART_PRISMA.md** for a fuller variable list (Twelve Data, optional `PORT`, `ADMIN_EMAIL`, etc.).
 
 4. **Database**
 

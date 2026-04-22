@@ -1,0 +1,4 @@
+const WALLET_CASH = "WALLET_CASH";
+const WALLET_CARD = "WALLET_CARD";
+
+module.exports = { WALLET_CASH, WALLET_CARD };

@@ -15,6 +15,7 @@ const createTransactionSchema = z.object({
   occurredAt: z.coerce.date().optional(),
   note: z.string().max(500).optional(),
   categoryId: z.string().min(1),
+  walletId: z.string().min(1).optional(),
 });
 
 transactionsRouter.use(requireAuth);
@@ -27,6 +28,23 @@ transactionsRouter.get("/", async (req, res, next) => {
       200,
       Math.max(1, Number.parseInt(req.query.limit, 10) || 100)
     );
+
+    const walletIdRaw =
+      typeof req.query.walletId === "string" && req.query.walletId.trim()
+        ? req.query.walletId.trim()
+        : undefined;
+
+    let walletIdFilter = undefined;
+    if (walletIdRaw) {
+      const w = await prisma.accountWallet.findFirst({
+        where: { id: walletIdRaw, accountId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!w) {
+        return res.status(400).json({ error: "Invalid walletId for this account" });
+      }
+      walletIdFilter = walletIdRaw;
+    }
 
     const categoryIdRaw =
       typeof req.query.categoryId === "string" && req.query.categoryId.trim()
@@ -49,11 +67,35 @@ transactionsRouter.get("/", async (req, res, next) => {
       categoryIdFilter = categoryIdRaw;
     }
 
+    const fromParam = req.query.from;
+    const toParam = req.query.to;
+    const from =
+      typeof fromParam === "string" && fromParam
+        ? new Date(fromParam)
+        : undefined;
+    const to =
+      typeof toParam === "string" && toParam ? new Date(toParam) : undefined;
+    if (from && isNaN(from.getTime())) {
+      return res.status(400).json({ error: "Invalid from date" });
+    }
+    if (to && isNaN(to.getTime())) {
+      return res.status(400).json({ error: "Invalid to date" });
+    }
+
     const transactions = await prisma.transaction.findMany({
       where: {
         accountId,
         deletedAt: null,
         ...(categoryIdFilter ? { categoryId: categoryIdFilter } : {}),
+        ...(walletIdFilter ? { walletId: walletIdFilter } : {}),
+        ...(from || to
+          ? {
+              occurredAt: {
+                ...(from ? { gte: from } : {}),
+                ...(to ? { lte: to } : {}),
+              },
+            }
+          : {}),
       },
       select: {
         id: true,
@@ -63,8 +105,11 @@ transactionsRouter.get("/", async (req, res, next) => {
         occurredAt: true,
         note: true,
         categoryId: true,
+        walletId: true,
         instrumentId: true,
         investmentQuantity: true,
+        transferGroupId: true,
+        transferPairId: true,
         revokedAt: true,
         createdAt: true,
         updatedAt: true,
@@ -99,6 +144,9 @@ transactionsRouter.get("/:transactionId", async (req, res, next) => {
         categoryId: true,
         instrumentId: true,
         investmentQuantity: true,
+        walletId: true,
+        transferGroupId: true,
+        transferPairId: true,
         revokedAt: true,
         createdAt: true,
         updatedAt: true,
@@ -192,6 +240,9 @@ transactionsRouter.get("/:transactionId", async (req, res, next) => {
         occurredAt: row.occurredAt.toISOString(),
         note: row.note,
         categoryId: row.categoryId,
+        walletId: row.walletId,
+        transferGroupId: row.transferGroupId,
+        transferPairId: row.transferPairId,
         instrumentId: row.instrumentId,
         investmentQuantity:
           row.investmentQuantity != null
@@ -219,11 +270,25 @@ transactionsRouter.post("/", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, currency: true },
+      select: { id: true, currency: true, walletsEnabled: true },
     });
 
     if (!account) {
       return res.status(404).json({ error: "Account not found" });
+    }
+
+    let walletId = body.walletId ?? null;
+    if (account.walletsEnabled) {
+      if (!walletId) {
+        return res.status(400).json({ error: "walletId is required when wallets are enabled" });
+      }
+      const w = await prisma.accountWallet.findFirst({
+        where: { id: walletId, accountId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!w) return res.status(400).json({ error: "Invalid walletId for this account" });
+    } else if (walletId) {
+      return res.status(400).json({ error: "walletId is only allowed when wallets are enabled" });
     }
 
     // Enforce single currency per account
@@ -271,6 +336,7 @@ transactionsRouter.post("/", async (req, res, next) => {
         note: body.note ?? null,
         categoryId: body.categoryId,
         createdByUserId: userId,
+        walletId,
       },
       select: {
         id: true,
@@ -280,6 +346,7 @@ transactionsRouter.post("/", async (req, res, next) => {
         occurredAt: true,
         note: true,
         categoryId: true,
+        walletId: true,
         revokedAt: true,
         createdAt: true,
       },
@@ -324,6 +391,8 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
         instrumentId: true,
         amountMinor: true,
         investmentQuantity: true,
+        transferGroupId: true,
+        transferPairId: true,
       },
     });
 
@@ -336,6 +405,65 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
     }
 
     const updated = await prisma.$transaction(async (tx) => {
+      const now = new Date();
+
+      if (existing.transferPairId) {
+        await tx.transaction.updateMany({
+          where: {
+            accountId,
+            transferPairId: existing.transferPairId,
+            deletedAt: null,
+            revokedAt: null,
+          },
+          data: { revokedAt: now },
+        });
+        return tx.transaction.findFirst({
+          where: { id: transactionId },
+          select: {
+            id: true,
+            type: true,
+            amountMinor: true,
+            currency: true,
+            occurredAt: true,
+            note: true,
+            categoryId: true,
+            instrumentId: true,
+            investmentQuantity: true,
+            revokedAt: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+      }
+
+      if (existing.transferGroupId) {
+        await tx.transaction.updateMany({
+          where: {
+            transferGroupId: existing.transferGroupId,
+            deletedAt: null,
+            revokedAt: null,
+          },
+          data: { revokedAt: now },
+        });
+        return tx.transaction.findFirst({
+          where: { id: transactionId },
+          select: {
+            id: true,
+            type: true,
+            amountMinor: true,
+            currency: true,
+            occurredAt: true,
+            note: true,
+            categoryId: true,
+            instrumentId: true,
+            investmentQuantity: true,
+            revokedAt: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+      }
+
       if (
         existing.type === "INVESTMENT" &&
         existing.instrumentId &&
@@ -389,7 +517,7 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
 
       return tx.transaction.update({
         where: { id: transactionId },
-        data: { revokedAt: new Date() },
+        data: { revokedAt: now },
         select: {
           id: true,
           type: true,

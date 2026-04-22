@@ -15,6 +15,7 @@ accountInstrumentsRouter.use(requireAccountMember("accountId"));
 const cashOutSchema = z.object({
   quantitySold: z.number().positive(),
   pricePerUnit: z.number().positive(),
+  walletId: z.string().min(1).optional(),
 });
 
 /**
@@ -165,11 +166,25 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, currency: true, investingEnabled: true },
+      select: { id: true, currency: true, investingEnabled: true, walletsEnabled: true },
     });
     if (!account) return res.status(404).json({ error: "Account not found" });
     if (!account.investingEnabled) {
       return res.status(403).json({ error: "Investing is disabled for this account" });
+    }
+
+    let walletId = body.walletId ?? null;
+    if (account.walletsEnabled) {
+      if (!walletId) {
+        return res.status(400).json({ error: "walletId is required when wallets are enabled" });
+      }
+      const w = await prisma.accountWallet.findFirst({
+        where: { id: walletId, accountId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!w) return res.status(400).json({ error: "Invalid walletId for this account" });
+    } else if (walletId) {
+      return res.status(400).json({ error: "walletId is only allowed when wallets are enabled" });
     }
 
     const proceedsMinor = Math.round(body.quantitySold * body.pricePerUnit * 100);
@@ -234,6 +249,7 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
           categoryId: cat.id,
           createdByUserId: userId,
           instrumentId,
+          walletId,
         },
         select: {
           id: true,

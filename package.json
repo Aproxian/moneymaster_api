@@ -10,27 +10,35 @@
   "author": "Aproxian Web & Digital",
   "type": "commonjs",
   "main": "src/server.js",
+  "engines": {
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
+  },
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:check-env": "node -e \"require('dotenv').config();console.log('CWD:',process.cwd());console.log('NODE:',process.version);const u=process.env.DATABASE_URL;let d='MISSING';if(u){try{const x=new URL(u);d='set ('+x.protocol+'//'+x.hostname+(x.port?':'+x.port:'')+')';}catch(e){d='set (unparseable)';}}console.log('DATABASE_URL:',d);\"",
+    "prisma:diag": "node -e \"const fs=require('fs'),p=require('path'),c=require('crypto'),{spawnSync}=require('child_process');const rp=require.resolve('prisma/package.json');const dir=p.dirname(rp);const cli=p.join(dir,'build','index.js');const j=JSON.parse(fs.readFileSync(rp,'utf8'));let cv='(missing)';try{cv=require(require.resolve('@prisma/client/package.json')).version;}catch(e){}let st='(missing)',sha='(missing)',chk='(missing)';try{st=String(fs.statSync(cli).size);sha=c.createHash('sha256').update(fs.readFileSync(cli)).digest('hex');const s=spawnSync(process.execPath,['--check',cli],{encoding:'utf8'});chk=s.status===0?'syntax_ok':'syntax_fail_'+s.status+(s.stderr?'_'+String(s.stderr).slice(0,200):'');}catch(e){chk='err_'+e.message;}console.log('resolved_prisma_dir',dir);console.log('prisma_package_version',j.version);console.log('@prisma/client',cv);console.log('cli_index_js_bytes',st);console.log('cli_index_js_sha256',sha);console.log('node_syntax_check',chk);console.log('NODE_OPTIONS',process.env.NODE_OPTIONS||'(unset)');\"",
+    "prisma:version": "cross-env NODE_OPTIONS= NODE_INSPECT= node scripts/prisma-spawn.js --version",
+    "prisma:generate": "cross-env NODE_OPTIONS= NODE_INSPECT= node scripts/prisma-spawn.js generate",
+    "prisma:generate:debug": "cross-env NODE_OPTIONS= NODE_INSPECT= node scripts/prisma-spawn.js --with-prisma-debug generate",
+    "prisma:migrate": "cross-env NODE_OPTIONS= NODE_INSPECT= node scripts/prisma-spawn.js migrate dev",
+    "prisma:migrate:deploy": "cross-env NODE_OPTIONS= NODE_INSPECT= node scripts/prisma-spawn.js migrate deploy",
+    "prisma:db-push": "cross-env NODE_OPTIONS= NODE_INSPECT= node scripts/prisma-spawn.js db push"
   },
   "dependencies": {
-    "@prisma/adapter-mariadb": "^7.4.2",
-    "@prisma/client": "^7.4.1",
+    "@prisma/adapter-mariadb": "7.7.0",
+    "@prisma/client": "7.7.0",
+    "@prisma/config": "7.7.0",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
+    "cross-env": "^7.0.3",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "node-fetch": "^2.7.0",
+    "prisma": "7.7.0",
     "zod": "^4.3.6"
-  },
-  "devDependencies": {
-    "@prisma/config": "^7.4.2",
-    "prisma": "^7.4.1"
   }
 }
