@@ -6,3 +6,5 @@ deployment:
   tasks:
     - export DEPLOYPATH=/home/nr5g65lkcc5a/api.aproxian.com/moneymaster
     - /bin/rsync -a ./ "$DEPLOYPATH/"
+    - cd $DEPLOYPATH && npm install
+    - cd $DEPLOYPATH && npx prisma generate
