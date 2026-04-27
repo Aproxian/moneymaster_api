@@ -32,14 +32,28 @@ async function processPendingSchedulesForUser(userId) {
   for (const sch of schedules) {
     try {
       await prisma.$transaction(async (tx) => {
-        const fresh = await tx.pendingTransactionSchedule.findFirst({
-          where: { id: sch.id, status: "PENDING", cancelledAt: null },
+        const claimed = await tx.pendingTransactionSchedule.updateMany({
+          where: {
+            id: sch.id,
+            status: "PENDING",
+            cancelledAt: null,
+            OR: [
+              { kind: "DELAY_ONCE", executeAt: { lte: now } },
+              { kind: "RECURRING", nextRunAt: { lte: now } },
+            ],
+          },
+          data: { lastRunAt: now },
         });
-        if (!fresh) return;
+        if (claimed.count !== 1) return;
+
+        const fresh = await tx.pendingTransactionSchedule.findUnique({
+          where: { id: sch.id },
+        });
+        if (!fresh) throw new Error("SCHEDULE_NOT_FOUND_AFTER_CLAIM");
 
         if (fresh.kind === "DELAY_ONCE") {
           const at = fresh.executeAt ?? fresh.nextRunAt;
-          if (!at || at > now) return;
+          if (!at || at > now) throw new Error("SCHEDULE_NOT_DUE_AFTER_CLAIM");
           await materializeScheduledPayload(tx, {
             accountId: fresh.accountId,
             userId: fresh.createdByUserId,
@@ -54,7 +68,7 @@ async function processPendingSchedulesForUser(userId) {
         }
 
         if (fresh.kind === "RECURRING") {
-          if (!fresh.recurrenceUnit) return;
+          if (!fresh.recurrenceUnit) throw new Error("SCHEDULE_MISSING_RECURRENCE_UNIT");
           let slot = new Date(fresh.nextRunAt);
           let runs = 0;
           while (slot <= now && runs < MAX_BURST) {
@@ -79,7 +93,10 @@ async function processPendingSchedulesForUser(userId) {
               lastRunAt: now,
             },
           });
+          return;
         }
+
+        throw new Error("UNKNOWN_SCHEDULE_KIND");
       });
     } catch (err) {
       // eslint-disable-next-line no-console -- operational visibility

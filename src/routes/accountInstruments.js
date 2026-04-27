@@ -263,7 +263,7 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
         },
       });
 
-      if (newQty < 1e-12 || newCost <= 0) {
+      if (newQty < 1e-12) {
         await tx.holding.update({
           where: { id: holding.id },
           data: {
