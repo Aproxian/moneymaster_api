@@ -8,8 +8,12 @@ function requireAccountMember(paramName = "accountId") {
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
     if (!accountId) return res.status(400).json({ error: "Missing accountId" });
 
-    const member = await prisma.accountMember.findUnique({
-      where: { userId_accountId: { userId, accountId } },
+    const member = await prisma.accountMember.findFirst({
+      where: {
+        userId,
+        accountId,
+        account: { deletedAt: null },
+      },
       select: { role: true },
     });
 

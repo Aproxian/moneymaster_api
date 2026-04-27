@@ -437,6 +437,38 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
       }
 
       if (existing.transferGroupId) {
+        const transferGroup = await tx.transferGroup.findFirst({
+          where: {
+            id: existing.transferGroupId,
+            deletedAt: null,
+            OR: [{ fromAccountId: accountId }, { toAccountId: accountId }],
+          },
+          select: { fromAccountId: true, toAccountId: true },
+        });
+        if (!transferGroup) {
+          const err = new Error("TRANSFER_GROUP_NOT_FOUND");
+          err.statusCode = 404;
+          throw err;
+        }
+
+        const otherAccountId =
+          transferGroup.fromAccountId === accountId
+            ? transferGroup.toAccountId
+            : transferGroup.fromAccountId;
+        const otherMember = await tx.accountMember.findFirst({
+          where: {
+            userId,
+            accountId: otherAccountId,
+            account: { deletedAt: null },
+          },
+          select: { role: true },
+        });
+        if (!otherMember) {
+          const err = new Error("TRANSFER_REVOKE_REQUIRES_BOTH_ACCOUNTS");
+          err.statusCode = 403;
+          throw err;
+        }
+
         await tx.transaction.updateMany({
           where: {
             transferGroupId: existing.transferGroupId,
@@ -555,6 +587,9 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
       },
     });
   } catch (err) {
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
     next(err);
   }
 });
