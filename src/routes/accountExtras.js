@@ -233,15 +233,26 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
     });
     if (!account) return res.status(404).json({ error: "Account not found" });
 
-    const q = qRaw;
-    const nameInsensitive = { contains: q, mode: "insensitive" };
+    /** Avoid odd DB/driver issues with NUL / extreme length; keep echo as original trim. */
+    const q = qRaw.replace(/\u0000/g, "").slice(0, 200);
+    if (!q) {
+      return res.json({
+        query: qRaw,
+        categories: [],
+        noteTransactions: [],
+        amountMatches: null,
+        instrumentTransactions: [],
+      });
+    }
+    /** MySQL: do not use `mode: "insensitive"` here — it can throw / 500 with Prisma + MariaDB. */
+    const nameMatch = { contains: q };
 
     const categories = await prisma.category.findMany({
       where: {
         accountId,
         deletedAt: null,
         OR: [
-          { name: nameInsensitive },
+          { name: nameMatch },
           ...(account.investingEnabled
             ? [
                 {
@@ -249,8 +260,8 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
                     some: {
                       instrument: {
                         OR: [
-                          { name: nameInsensitive },
-                          { providerSymbol: nameInsensitive },
+                          { name: nameMatch },
+                          { providerSymbol: nameMatch },
                         ],
                       },
                     },
@@ -291,10 +302,10 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
         transferPairId: true,
       },
       take: 50,
-      orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
+      orderBy: { occurredAt: "desc" },
     });
 
-    const num = Number.parseFloat(q.replace(",", "."));
+    const num = Number.parseFloat(String(q).replace(",", "."));
     let amountMatches = null;
     if (Number.isFinite(num)) {
       const targetMinor = Math.round(Math.abs(num) * 100);
@@ -322,7 +333,7 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
             transferPairId: true,
           },
           take: 80,
-          orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
+          orderBy: { occurredAt: "desc" },
         });
         amountMatches = { query: num, negative: true, transactions: expenseOnly };
       } else {
@@ -341,7 +352,7 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
               transferPairId: true,
             },
             take: 40,
-            orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
+            orderBy: { occurredAt: "desc" },
           }),
           prisma.transaction.findMany({
             where: { ...baseWhere, type: "INVESTMENT" },
@@ -357,7 +368,7 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
               transferPairId: true,
             },
             take: 40,
-            orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
+            orderBy: { occurredAt: "desc" },
           }),
           prisma.transaction.findMany({
             where: { ...baseWhere, type: "EXPENSE" },
@@ -373,7 +384,7 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
               transferPairId: true,
             },
             take: 80,
-            orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
+            orderBy: { occurredAt: "desc" },
           }),
         ]);
 
@@ -398,7 +409,7 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
             transferPairId: true,
           },
           take: 40,
-          orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
+          orderBy: { occurredAt: "desc" },
         });
 
         const seen = new Set();
@@ -429,10 +440,7 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
               revokedAt: null,
               instrumentId: { not: null },
               instrument: {
-                OR: [
-                  { name: nameInsensitive },
-                  { providerSymbol: nameInsensitive },
-                ],
+                OR: [{ name: nameMatch }, { providerSymbol: nameMatch }],
               },
             },
             select: {
@@ -454,7 +462,7 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
               },
             },
             take: 50,
-            orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
+            orderBy: { occurredAt: "desc" },
           })
         : [];
 
@@ -466,7 +474,7 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
     });
 
     return res.json({
-      query: qRaw,
+      query: qRaw.slice(0, 200),
       categories,
       noteTransactions: noteTransactions.map(tagTx),
       amountMatches: amountMatches

@@ -313,7 +313,7 @@ accountsRouter.patch(
 
       const existing = await prisma.account.findFirst({
         where: { id: accountId, deletedAt: null },
-        select: { id: true, investingEnabled: true },
+        select: { id: true, investingEnabled: true, walletsEnabled: true },
       });
       if (!existing) return res.status(404).json({ error: "Account not found" });
 
@@ -380,6 +380,17 @@ accountsRouter.patch(
         }
         if (body.investingEnabled === true && !existing.investingEnabled) {
           await ensureInvestmentCategories(tx, accountId);
+        }
+
+        if (body.walletsEnabled === false && existing.walletsEnabled) {
+          await tx.transaction.updateMany({
+            where: { accountId, deletedAt: null },
+            data: { walletId: null },
+          });
+          await tx.accountWallet.updateMany({
+            where: { accountId, deletedAt: null },
+            data: { deletedAt: new Date() },
+          });
         }
 
         if (body.walletsEnabled === true) {

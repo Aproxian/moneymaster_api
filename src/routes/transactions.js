@@ -18,21 +18,58 @@ const createTransactionSchema = z.object({
   walletId: z.string().min(1).optional(),
 });
 
+const assignWalletsBulkSchema = z.object({
+  assignments: z
+    .array(
+      z.object({
+        transactionId: z.string().min(1),
+        walletId: z.string().min(1),
+      })
+    )
+    .min(1)
+    .max(400),
+});
+
 transactionsRouter.use(requireAuth);
 transactionsRouter.use(requireAccountMember("accountId"));
 
 transactionsRouter.get("/", async (req, res, next) => {
   try {
     const { accountId } = req.params;
+    const unassignedRaw = req.query.unassigned;
+    const unassignedOnly =
+      unassignedRaw === "1" || unassignedRaw === "true" || unassignedRaw === "yes";
+
+    const account = await prisma.account.findFirst({
+      where: { id: accountId, deletedAt: null },
+      select: { walletsEnabled: true },
+    });
+    if (!account) return res.status(404).json({ error: "Account not found" });
+
+    if (unassignedOnly && !account.walletsEnabled) {
+      return res.status(400).json({ error: "unassigned filter requires wallets to be enabled" });
+    }
+
+    const maxTake = unassignedOnly ? 100 : 200;
     const take = Math.min(
-      200,
-      Math.max(1, Number.parseInt(req.query.limit, 10) || 100)
+      maxTake,
+      Math.max(1, Number.parseInt(req.query.limit, 10) || (unassignedOnly ? 100 : 100))
     );
+
+    const offsetRaw = Number.parseInt(req.query.offset, 10);
+    const offset =
+      unassignedOnly && Number.isFinite(offsetRaw) && offsetRaw >= 0
+        ? Math.min(offsetRaw, 10_000_000)
+        : 0;
 
     const walletIdRaw =
       typeof req.query.walletId === "string" && req.query.walletId.trim()
         ? req.query.walletId.trim()
         : undefined;
+
+    if (unassignedOnly && walletIdRaw) {
+      return res.status(400).json({ error: "Cannot combine unassigned and walletId filters" });
+    }
 
     let walletIdFilter = undefined;
     if (walletIdRaw) {
@@ -82,21 +119,29 @@ transactionsRouter.get("/", async (req, res, next) => {
       return res.status(400).json({ error: "Invalid to date" });
     }
 
+    const where = {
+      accountId,
+      deletedAt: null,
+      ...(unassignedOnly ? { walletId: null, revokedAt: null } : {}),
+      ...(categoryIdFilter ? { categoryId: categoryIdFilter } : {}),
+      ...(walletIdFilter ? { walletId: walletIdFilter } : {}),
+      ...(from || to
+        ? {
+            occurredAt: {
+              ...(from ? { gte: from } : {}),
+              ...(to ? { lte: to } : {}),
+            },
+          }
+        : {}),
+    };
+
+    let total = undefined;
+    if (unassignedOnly) {
+      total = await prisma.transaction.count({ where });
+    }
+
     const transactions = await prisma.transaction.findMany({
-      where: {
-        accountId,
-        deletedAt: null,
-        ...(categoryIdFilter ? { categoryId: categoryIdFilter } : {}),
-        ...(walletIdFilter ? { walletId: walletIdFilter } : {}),
-        ...(from || to
-          ? {
-              occurredAt: {
-                ...(from ? { gte: from } : {}),
-                ...(to ? { lte: to } : {}),
-              },
-            }
-          : {}),
-      },
+      where,
       select: {
         id: true,
         type: true,
@@ -116,9 +161,88 @@ transactionsRouter.get("/", async (req, res, next) => {
       },
       orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
       take,
+      ...(unassignedOnly ? { skip: offset } : {}),
     });
 
+    const hasMore = unassignedOnly ? offset + transactions.length < total : false;
+
+    if (unassignedOnly) {
+      return res.json({
+        transactions,
+        total,
+        offset,
+        limit: take,
+        hasMore,
+      });
+    }
+
     return res.json({ transactions });
+  } catch (err) {
+    next(err);
+  }
+});
+
+transactionsRouter.post("/assign-wallets", async (req, res, next) => {
+  try {
+    const { accountId } = req.params;
+    const userId = req.auth.userId;
+    const body = assignWalletsBulkSchema.parse(req.body);
+
+    const account = await prisma.account.findFirst({
+      where: { id: accountId, deletedAt: null },
+      select: { id: true, walletsEnabled: true },
+    });
+    if (!account) return res.status(404).json({ error: "Account not found" });
+    if (!account.walletsEnabled) {
+      return res.status(400).json({ error: "Wallets are not enabled for this account" });
+    }
+
+    const walletRows = await prisma.accountWallet.findMany({
+      where: { accountId, deletedAt: null },
+      select: { id: true },
+    });
+    const walletSet = new Set(walletRows.map((w) => w.id));
+
+    const txIds = [...new Set(body.assignments.map((a) => a.transactionId))];
+    const rows = await prisma.transaction.findMany({
+      where: {
+        id: { in: txIds },
+        accountId,
+        deletedAt: null,
+        revokedAt: null,
+      },
+      select: { id: true },
+    });
+    if (rows.length !== txIds.length) {
+      return res.status(400).json({ error: "One or more transactions were not found or are not assignable" });
+    }
+
+    for (const a of body.assignments) {
+      if (!walletSet.has(a.walletId)) {
+        return res.status(400).json({ error: "Invalid walletId in assignments" });
+      }
+    }
+
+    await prisma.$transaction(
+      body.assignments.map((a) =>
+        prisma.transaction.update({
+          where: { id: a.transactionId },
+          data: { walletId: a.walletId },
+        })
+      )
+    );
+
+    await prisma.auditLog.create({
+      data: {
+        userId,
+        action: "UPDATE",
+        entity: "Transaction",
+        entityId: accountId,
+        meta: { accountId, action: "BULK_ASSIGN_WALLETS", count: body.assignments.length },
+      },
+    });
+
+    return res.json({ updated: body.assignments.length });
   } catch (err) {
     next(err);
   }
