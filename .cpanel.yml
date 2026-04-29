@@ -7,5 +7,3 @@ deployment:
     - export DEPLOYPATH=/home/nr5g65lkcc5a/api.aproxian.com/moneymaster
     - export PATH=/home/nr5g65lkcc5a/.nvm/versions/node/v20.20.2/bin:$PATH
     - /bin/rsync -a ./ "$DEPLOYPATH/"
-    - cd $DEPLOYPATH && npm install
-    - cd $DEPLOYPATH && npx prisma generate
