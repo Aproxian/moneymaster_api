@@ -124,6 +124,8 @@ model Account {
   currency  String    @default("EUR")
   /// When true, user splits cash flow into emoji wallets (cash/card defaults on enable).
   walletsEnabled Boolean @default(false)
+  /// True while first-time wallet setup is in progress; wallets exist but feature is not live until completed.
+  walletMigrationPending Boolean @default(false)
   /// When false, investment UI and flows are hidden; no holdings may remain before turning off.
   investingEnabled Boolean @default(true)
   isBusiness Boolean  @default(false)

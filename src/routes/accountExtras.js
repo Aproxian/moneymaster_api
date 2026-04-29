@@ -48,7 +48,7 @@ accountExtrasRouter.get("/wallets", async (req, res, next) => {
     const { accountId } = req.params;
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { walletsEnabled: true },
+      select: { walletsEnabled: true, walletMigrationPending: true },
     });
     if (!account) return res.status(404).json({ error: "Account not found" });
 
@@ -70,6 +70,7 @@ accountExtrasRouter.get("/wallets", async (req, res, next) => {
 
     return res.json({
       walletsEnabled: account.walletsEnabled,
+      walletMigrationPending: account.walletMigrationPending,
       wallets: wallets.map((w, i) => ({ ...w, balanceMinor: balances[i] })),
     });
   } catch (err) {
@@ -85,10 +86,10 @@ accountExtrasRouter.post("/wallets", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { walletsEnabled: true },
+      select: { walletsEnabled: true, walletMigrationPending: true },
     });
     if (!account) return res.status(404).json({ error: "Account not found" });
-    if (!account.walletsEnabled) {
+    if (!account.walletsEnabled && !account.walletMigrationPending) {
       return res.status(400).json({ error: "Enable wallets for this account first" });
     }
 

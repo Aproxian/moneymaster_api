@@ -42,11 +42,11 @@ transactionsRouter.get("/", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { walletsEnabled: true },
+      select: { walletsEnabled: true, walletMigrationPending: true },
     });
     if (!account) return res.status(404).json({ error: "Account not found" });
 
-    if (unassignedOnly && !account.walletsEnabled) {
+    if (unassignedOnly && !account.walletsEnabled && !account.walletMigrationPending) {
       return res.status(400).json({ error: "unassigned filter requires wallets to be enabled" });
     }
 
@@ -190,10 +190,10 @@ transactionsRouter.post("/assign-wallets", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, walletsEnabled: true },
+      select: { id: true, walletsEnabled: true, walletMigrationPending: true },
     });
     if (!account) return res.status(404).json({ error: "Account not found" });
-    if (!account.walletsEnabled) {
+    if (!account.walletsEnabled && !account.walletMigrationPending) {
       return res.status(400).json({ error: "Wallets are not enabled for this account" });
     }
 
@@ -394,7 +394,7 @@ transactionsRouter.post("/", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, currency: true, walletsEnabled: true },
+      select: { id: true, currency: true, walletsEnabled: true, walletMigrationPending: true },
     });
 
     if (!account) {
@@ -402,7 +402,8 @@ transactionsRouter.post("/", async (req, res, next) => {
     }
 
     let walletId = body.walletId ?? null;
-    if (account.walletsEnabled) {
+    const walletsLive = account.walletsEnabled || account.walletMigrationPending;
+    if (walletsLive) {
       if (!walletId) {
         return res.status(400).json({ error: "walletId is required when wallets are enabled" });
       }

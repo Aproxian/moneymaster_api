@@ -14,6 +14,60 @@ const { seedDefaultWallets } = require("../services/seedDefaultWallets");
 
 const accountsRouter = Router();
 
+/**
+ * @param {import('@prisma/client').PrismaClient} prismaClient
+ * @param {string} accountId
+ * @param {string} userId
+ * @param {string} memberRole
+ */
+async function loadAccountDetail(prismaClient, accountId, userId, memberRole) {
+  const me = await prismaClient.user.findUnique({
+    where: { id: userId },
+    select: { personalAccountId: true },
+  });
+  const account = await prismaClient.account.findFirst({
+    where: { id: accountId, deletedAt: null },
+    select: {
+      id: true,
+      name: true,
+      currency: true,
+      investingEnabled: true,
+      walletsEnabled: true,
+      walletMigrationPending: true,
+      isBusiness: true,
+      companyName: true,
+      companyLegalName: true,
+      companyTaxId: true,
+      companyAddress: true,
+      companyNotes: true,
+      createdAt: true,
+      updatedAt: true,
+      wallets: {
+        where: { deletedAt: null },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+        select: {
+          id: true,
+          emoji: true,
+          sortOrder: true,
+          internalKey: true,
+          createdAt: true,
+        },
+      },
+    },
+  });
+  if (!account) return null;
+  const personalId = me?.personalAccountId ?? null;
+  const { wallets, ...rest } = account;
+  return {
+    account: {
+      ...rest,
+      wallets,
+      isPersonal: personalId != null && account.id === personalId,
+      myRole: memberRole,
+    },
+  };
+}
+
 const createAccountSchema = z.object({
   name: z.string().min(1).max(120),
   currency: z.string().min(1).max(10),
@@ -36,6 +90,9 @@ const patchAccountSchema = z.object({
   companyTaxId: z.string().max(80).optional().nullable(),
   companyAddress: z.string().max(8000).optional().nullable(),
   companyNotes: z.string().max(8000).optional().nullable(),
+  startWalletMigration: z.boolean().optional(),
+  completeWalletMigration: z.boolean().optional(),
+  cancelWalletMigration: z.boolean().optional(),
 });
 
 const addMemberSchema = z.object({
@@ -74,6 +131,7 @@ accountsRouter.get("/", async (req, res, next) => {
         currency: true,
         investingEnabled: true,
         walletsEnabled: true,
+        walletMigrationPending: true,
         isBusiness: true,
         companyName: true,
         createdAt: true,
@@ -96,6 +154,7 @@ accountsRouter.get("/", async (req, res, next) => {
         currency: a.currency,
         investingEnabled: a.investingEnabled,
         walletsEnabled: a.walletsEnabled,
+        walletMigrationPending: a.walletMigrationPending,
         isBusiness: a.isBusiness,
         companyName: a.companyName,
         createdAt: a.createdAt,
@@ -310,12 +369,81 @@ accountsRouter.patch(
     try {
       const { accountId } = req.params;
       const body = patchAccountSchema.parse(req.body);
+      const userId = req.auth.userId;
+      const memberRole = req.memberRole;
 
       const existing = await prisma.account.findFirst({
         where: { id: accountId, deletedAt: null },
-        select: { id: true, investingEnabled: true, walletsEnabled: true },
+        select: {
+          id: true,
+          investingEnabled: true,
+          walletsEnabled: true,
+          walletMigrationPending: true,
+        },
       });
       if (!existing) return res.status(404).json({ error: "Account not found" });
+
+      const migCount =
+        (body.cancelWalletMigration ? 1 : 0) +
+        (body.completeWalletMigration ? 1 : 0) +
+        (body.startWalletMigration ? 1 : 0);
+      if (migCount > 1) {
+        return res.status(400).json({ error: "Send only one wallet migration action at a time" });
+      }
+
+      if (body.cancelWalletMigration) {
+        const row = await prisma.account.findFirst({
+          where: { id: accountId, deletedAt: null },
+          select: { walletMigrationPending: true },
+        });
+        if (row?.walletMigrationPending) {
+          await prisma.$transaction(async (tx) => {
+            await tx.transaction.updateMany({
+              where: { accountId, deletedAt: null },
+              data: { walletId: null },
+            });
+            await tx.accountWallet.updateMany({
+              where: { accountId, deletedAt: null },
+              data: { deletedAt: new Date() },
+            });
+            await tx.account.update({
+              where: { id: accountId },
+              data: { walletMigrationPending: false, walletsEnabled: false },
+            });
+          });
+        }
+        const payload = await loadAccountDetail(prisma, accountId, userId, memberRole);
+        if (!payload) return res.status(404).json({ error: "Account not found" });
+        return res.json(payload);
+      }
+
+      if (body.completeWalletMigration) {
+        await prisma.$transaction(async (tx) => {
+          await tx.account.update({
+            where: { id: accountId },
+            data: { walletMigrationPending: false, walletsEnabled: true },
+          });
+        });
+        const payload = await loadAccountDetail(prisma, accountId, userId, memberRole);
+        if (!payload) return res.status(404).json({ error: "Account not found" });
+        return res.json(payload);
+      }
+
+      if (body.startWalletMigration) {
+        if (existing.walletsEnabled) {
+          return res.status(400).json({ error: "Wallets are already enabled for this account" });
+        }
+        await prisma.$transaction(async (tx) => {
+          await tx.account.update({
+            where: { id: accountId },
+            data: { walletMigrationPending: true, walletsEnabled: false },
+          });
+          await seedDefaultWallets(tx, accountId);
+        });
+        const payload = await loadAccountDetail(prisma, accountId, userId, memberRole);
+        if (!payload) return res.status(404).json({ error: "Account not found" });
+        return res.json(payload);
+      }
 
       if (body.investingEnabled === false && existing.investingEnabled) {
         const holdings = await prisma.holding.findMany({
@@ -354,25 +482,17 @@ accountsRouter.patch(
         data.companyNotes = null;
       }
 
-      const account = await prisma.$transaction(async (tx) => {
-        const updated = await tx.account.update({
+      if (body.walletsEnabled === false) {
+        data.walletMigrationPending = false;
+      }
+      if (body.walletsEnabled === true && !existing.walletsEnabled) {
+        data.walletMigrationPending = false;
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.account.update({
           where: { id: accountId },
           data,
-          select: {
-            id: true,
-            name: true,
-            currency: true,
-            investingEnabled: true,
-            walletsEnabled: true,
-            isBusiness: true,
-            companyName: true,
-            companyLegalName: true,
-            companyTaxId: true,
-            companyAddress: true,
-            companyNotes: true,
-            createdAt: true,
-            updatedAt: true,
-          },
         });
 
         if (body.investingEnabled === false && existing.investingEnabled) {
@@ -393,14 +513,14 @@ accountsRouter.patch(
           });
         }
 
-        if (body.walletsEnabled === true) {
+        if (body.walletsEnabled === true && !existing.walletsEnabled) {
           await seedDefaultWallets(tx, accountId);
         }
-
-        return updated;
       });
 
-      return res.json({ account });
+      const payload = await loadAccountDetail(prisma, accountId, userId, memberRole);
+      if (!payload) return res.status(404).json({ error: "Account not found" });
+      return res.json(payload);
     } catch (err) {
       next(err);
     }
@@ -425,6 +545,7 @@ accountsRouter.get("/:accountId", requireAccountMember("accountId"), async (req,
         currency: true,
         investingEnabled: true,
         walletsEnabled: true,
+        walletMigrationPending: true,
         isBusiness: true,
         companyName: true,
         companyLegalName: true,
@@ -473,7 +594,14 @@ accountsRouter.get(
 
       const account = await prisma.account.findFirst({
         where: { id: accountId, deletedAt: null },
-        select: { id: true, name: true, currency: true, investingEnabled: true, walletsEnabled: true },
+        select: {
+          id: true,
+          name: true,
+          currency: true,
+          investingEnabled: true,
+          walletsEnabled: true,
+          walletMigrationPending: true,
+        },
       });
 
       if (!account) return res.status(404).json({ error: "Account not found" });
@@ -484,7 +612,7 @@ accountsRouter.get(
           : undefined;
       let walletIdFilter = undefined;
       if (walletIdRaw) {
-        if (!account.walletsEnabled) {
+        if (!account.walletsEnabled && !account.walletMigrationPending) {
           return res.status(400).json({ error: "walletId filter requires wallets to be enabled" });
         }
         const w = await prisma.accountWallet.findFirst({
