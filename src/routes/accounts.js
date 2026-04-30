@@ -68,6 +68,46 @@ async function loadAccountDetail(prismaClient, accountId, userId, memberRole) {
   };
 }
 
+function schedulePayloadHasWallet(payload) {
+  return (
+    payload &&
+    typeof payload === "object" &&
+    typeof payload.walletId === "string" &&
+    payload.walletId.trim().length > 0
+  );
+}
+
+async function getWalletActivationBlockers(prismaClient, accountId) {
+  const [unassignedTransactions, pendingSchedules] = await Promise.all([
+    prismaClient.transaction.count({
+      where: {
+        accountId,
+        deletedAt: null,
+        revokedAt: null,
+        walletId: null,
+      },
+    }),
+    prismaClient.pendingTransactionSchedule.findMany({
+      where: {
+        accountId,
+        status: "PENDING",
+        cancelledAt: null,
+      },
+      select: { payload: true },
+    }),
+  ]);
+
+  const unassignedSchedules = pendingSchedules.filter(
+    (s) => !schedulePayloadHasWallet(s.payload)
+  ).length;
+
+  return { unassignedTransactions, unassignedSchedules };
+}
+
+function hasWalletActivationBlockers(blockers) {
+  return blockers.unassignedTransactions > 0 || blockers.unassignedSchedules > 0;
+}
+
 const createAccountSchema = z.object({
   name: z.string().min(1).max(120),
   currency: z.string().min(1).max(10),
@@ -418,6 +458,13 @@ accountsRouter.patch(
       }
 
       if (body.completeWalletMigration) {
+        const blockers = await getWalletActivationBlockers(prisma, accountId);
+        if (hasWalletActivationBlockers(blockers)) {
+          return res.status(400).json({
+            error: "Assign wallets to all active transactions and pending schedules before completing wallet migration",
+            ...blockers,
+          });
+        }
         await prisma.$transaction(async (tx) => {
           await tx.account.update({
             where: { id: accountId },
@@ -486,6 +533,13 @@ accountsRouter.patch(
         data.walletMigrationPending = false;
       }
       if (body.walletsEnabled === true && !existing.walletsEnabled) {
+        const blockers = await getWalletActivationBlockers(prisma, accountId);
+        if (hasWalletActivationBlockers(blockers)) {
+          return res.status(400).json({
+            error: "Use wallet migration and assign every active transaction and pending schedule before enabling wallets",
+            ...blockers,
+          });
+        }
         data.walletMigrationPending = false;
       }
 
