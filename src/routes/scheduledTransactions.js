@@ -88,16 +88,22 @@ scheduledTransactionsRouter.post("/", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, investingEnabled: true, walletsEnabled: true },
+      select: {
+        id: true,
+        investingEnabled: true,
+        walletsEnabled: true,
+        walletMigrationPending: true,
+      },
     });
     if (!account) return res.status(404).json({ error: "Account not found" });
     if (payload.tab === "invest" && !account.investingEnabled) {
       return res.status(400).json({ error: "Investing is disabled for this account" });
     }
-    if (account.walletsEnabled && !payload.walletId) {
+    const walletsLive = account.walletsEnabled || account.walletMigrationPending;
+    if (walletsLive && !payload.walletId) {
       return res.status(400).json({ error: "walletId is required when this account uses wallets" });
     }
-    if (!account.walletsEnabled && payload.walletId) {
+    if (!walletsLive && payload.walletId) {
       return res.status(400).json({ error: "walletId is not used when wallets are disabled" });
     }
 
