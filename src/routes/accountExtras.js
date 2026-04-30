@@ -19,6 +19,10 @@ const patchWalletSchema = z.object({
   emoji: z.string().trim().min(1).max(16),
 });
 
+const reorderWalletsSchema = z.object({
+  orderedWalletIds: z.array(z.string().min(1)).min(1),
+});
+
 const structuredTransferSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("WALLET"),
@@ -127,6 +131,54 @@ accountExtrasRouter.post("/wallets", async (req, res, next) => {
     });
 
     return res.status(201).json({ wallet: { ...wallet, balanceMinor } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Set `sortOrder` to each wallet’s index in `orderedWalletIds` (left-to-right on the client). */
+accountExtrasRouter.put("/wallets/reorder", async (req, res, next) => {
+  try {
+    const { accountId } = req.params;
+    const userId = req.auth.userId;
+    const body = reorderWalletsSchema.parse(req.body);
+
+    const existing = await prisma.accountWallet.findMany({
+      where: { accountId, deletedAt: null },
+      select: { id: true },
+    });
+    const validIds = new Set(existing.map((e) => e.id));
+    if (body.orderedWalletIds.length !== validIds.size) {
+      return res.status(400).json({
+        error: "orderedWalletIds must list every wallet exactly once",
+      });
+    }
+    for (const id of body.orderedWalletIds) {
+      if (!validIds.has(id)) {
+        return res.status(400).json({ error: "Unknown wallet id in orderedWalletIds" });
+      }
+    }
+
+    await prisma.$transaction(
+      body.orderedWalletIds.map((id, index) =>
+        prisma.accountWallet.update({
+          where: { id },
+          data: { sortOrder: index },
+        })
+      )
+    );
+
+    await prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'UPDATE',
+        entity: 'Account',
+        entityId: accountId,
+        meta: { walletReorder: body.orderedWalletIds },
+      },
+    });
+
+    return res.json({ ok: true });
   } catch (err) {
     next(err);
   }
