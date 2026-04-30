@@ -40,25 +40,38 @@ transactionsRouter.get("/", async (req, res, next) => {
     const unassignedOnly =
       unassignedRaw === "1" || unassignedRaw === "true" || unassignedRaw === "yes";
 
+    const walletReassignRaw = req.query.walletReassign;
+    const walletReassign =
+      walletReassignRaw === "1" || walletReassignRaw === "true" || walletReassignRaw === "yes";
+
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
       select: { walletsEnabled: true, walletMigrationPending: true },
     });
     if (!account) return res.status(404).json({ error: "Account not found" });
 
+    if (unassignedOnly && walletReassign) {
+      return res.status(400).json({ error: "Cannot combine walletReassign and unassigned filters" });
+    }
+
     if (unassignedOnly && !account.walletsEnabled && !account.walletMigrationPending) {
       return res.status(400).json({ error: "unassigned filter requires wallets to be enabled" });
     }
 
-    const maxTake = unassignedOnly ? 100 : 200;
+    if (walletReassign && !account.walletsEnabled && !account.walletMigrationPending) {
+      return res.status(400).json({ error: "walletReassign requires wallets to be enabled" });
+    }
+
+    const pagedList = unassignedOnly || walletReassign;
+    const maxTake = pagedList ? 100 : 200;
     const take = Math.min(
       maxTake,
-      Math.max(1, Number.parseInt(req.query.limit, 10) || (unassignedOnly ? 100 : 100))
+      Math.max(1, Number.parseInt(req.query.limit, 10) || (pagedList ? 100 : 100))
     );
 
     const offsetRaw = Number.parseInt(req.query.offset, 10);
     const offset =
-      unassignedOnly && Number.isFinite(offsetRaw) && offsetRaw >= 0
+      pagedList && Number.isFinite(offsetRaw) && offsetRaw >= 0
         ? Math.min(offsetRaw, 10_000_000)
         : 0;
 
@@ -69,6 +82,10 @@ transactionsRouter.get("/", async (req, res, next) => {
 
     if (unassignedOnly && walletIdRaw) {
       return res.status(400).json({ error: "Cannot combine unassigned and walletId filters" });
+    }
+
+    if (walletReassign && walletIdRaw) {
+      return res.status(400).json({ error: "Cannot combine walletReassign and walletId filters" });
     }
 
     let walletIdFilter = undefined;
@@ -123,6 +140,7 @@ transactionsRouter.get("/", async (req, res, next) => {
       accountId,
       deletedAt: null,
       ...(unassignedOnly ? { walletId: null, revokedAt: null } : {}),
+      ...(walletReassign ? { revokedAt: null } : {}),
       ...(categoryIdFilter ? { categoryId: categoryIdFilter } : {}),
       ...(walletIdFilter ? { walletId: walletIdFilter } : {}),
       ...(from || to
@@ -136,7 +154,7 @@ transactionsRouter.get("/", async (req, res, next) => {
     };
 
     let total = undefined;
-    if (unassignedOnly) {
+    if (pagedList) {
       total = await prisma.transaction.count({ where });
     }
 
@@ -161,12 +179,12 @@ transactionsRouter.get("/", async (req, res, next) => {
       },
       orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
       take,
-      ...(unassignedOnly ? { skip: offset } : {}),
+      ...(pagedList ? { skip: offset } : {}),
     });
 
-    const hasMore = unassignedOnly ? offset + transactions.length < total : false;
+    const hasMore = pagedList ? offset + transactions.length < total : false;
 
-    if (unassignedOnly) {
+    if (pagedList) {
       return res.json({
         transactions,
         total,
