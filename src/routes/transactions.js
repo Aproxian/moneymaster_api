@@ -215,13 +215,17 @@ transactionsRouter.post("/assign-wallets", async (req, res, next) => {
       return res.status(400).json({ error: "Wallets are not enabled for this account" });
     }
 
+    const txIds = [...new Set(body.assignments.map((a) => a.transactionId))];
+    if (txIds.length !== body.assignments.length) {
+      return res.status(400).json({ error: "Each transaction can only be assigned once" });
+    }
+
     const walletRows = await prisma.accountWallet.findMany({
       where: { accountId, deletedAt: null },
       select: { id: true },
     });
     const walletSet = new Set(walletRows.map((w) => w.id));
 
-    const txIds = [...new Set(body.assignments.map((a) => a.transactionId))];
     const rows = await prisma.transaction.findMany({
       where: {
         id: { in: txIds },
