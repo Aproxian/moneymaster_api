@@ -411,6 +411,14 @@ model TwelveDataQuoteRefreshState {
   updatedAt     DateTime @updatedAt
 }
 
+/// Single-row app-wide flags (e.g. API maintenance). Id is always `singleton`.
+model GlobalAppState {
+  id                   String   @id
+  maintenanceMode      Boolean  @default(false)
+  maintenanceMessage   String?  @db.VarChar(500)
+  updatedAt            DateTime @updatedAt
+}
+
 /// Saved instruments per INVESTMENT category (wishlist) for quick pick when logging buys.
 model CategoryWishlistItem {
   id           String   @id @default(cuid())

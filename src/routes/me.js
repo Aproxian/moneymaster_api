@@ -6,8 +6,57 @@ const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
 const { isAdminUserEmail } = require("../lib/adminUser");
 const { processPendingSchedulesForUser } = require("../services/processPendingSchedules");
+const { getMaintenanceState, setMaintenanceState } = require("../services/globalAppState");
 
 const meRouter = Router();
+
+/** Public: clients poll this (no auth) for global maintenance lock. */
+meRouter.get("/public/maintenance", async (_req, res, next) => {
+  try {
+    const s = await getMaintenanceState();
+    return res.json({
+      maintenanceMode: s.maintenanceMode,
+      message: s.message,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const patchMaintenanceSchema = z.object({
+  enabled: z.boolean(),
+  message: z.string().max(500).optional().nullable(),
+});
+
+meRouter.patch("/admin/maintenance", requireAuth, async (req, res, next) => {
+  try {
+    const adminEmail = process.env.ADMIN_EMAIL?.trim();
+    if (!adminEmail) {
+      return res.status(503).json({ error: "ADMIN_EMAIL is not configured on the server" });
+    }
+    const user = await prisma.user.findUnique({
+      where: { id: req.auth.userId },
+      select: { email: true },
+    });
+    if (!user || !isAdminUserEmail(user.email)) {
+      return res.status(403).json({ error: "Not allowed to perform this operation" });
+    }
+    const body = patchMaintenanceSchema.parse(req.body ?? {});
+    const s = await setMaintenanceState({
+      enabled: body.enabled,
+      message: body.message,
+    });
+    return res.json({
+      maintenanceMode: s.maintenanceMode,
+      message: s.message,
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: "Invalid body", details: err.flatten() });
+    }
+    next(err);
+  }
+});
 
 const patchMeSchema = z.object({
   displayName: z.string().max(80).optional(),
