@@ -39,11 +39,8 @@ async function assertAdmin(req, res) {
 
 investmentsRouter.post("/refresh-daily", async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (adminEmail) {
-      const user = await assertAdmin(req, res);
-      if (!user) return;
-    }
+    const user = await assertAdmin(req, res);
+    if (!user) return;
 
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const resetCycle =
