@@ -11,6 +11,9 @@ const {
   removeInvestmentCategories,
 } = require("../services/investingCategories");
 const { seedDefaultWallets } = require("../services/seedDefaultWallets");
+const {
+  throwIfCannotEnablePreventNegativeCashBalance,
+} = require("../services/nonNegativeCashBalance");
 
 const accountsRouter = Router();
 
@@ -396,6 +399,7 @@ accountsRouter.patch(
           investingEnabled: true,
           walletsEnabled: true,
           walletMigrationPending: true,
+          preventNegativeCashBalance: true,
         },
       });
       if (!existing) return res.status(404).json({ error: "Account not found" });
@@ -473,6 +477,23 @@ accountsRouter.patch(
             error:
               "Cash out or close all investment holdings before disabling investing for this account",
           });
+        }
+      }
+
+      if (
+        body.preventNegativeCashBalance === true &&
+        existing.preventNegativeCashBalance !== true
+      ) {
+        try {
+          await throwIfCannotEnablePreventNegativeCashBalance(
+            prisma,
+            accountId
+          );
+        } catch (e) {
+          if (e && e.code === "NEGATIVE_BALANCE_FOR_LOCK") {
+            return res.status(400).json({ error: e.message });
+          }
+          throw e;
         }
       }
 

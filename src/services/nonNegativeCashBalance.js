@@ -77,7 +77,64 @@ async function throwIfExpenseWouldCauseNegativeCashBalance(
   }
 }
 
+/**
+ * When turning on {@link Account.preventNegativeCashBalance}, the book and (if wallets are live)
+ * every wallet must already be non-negative—otherwise the rule cannot be applied consistently.
+ *
+ * @param {import('@prisma/client').Prisma.TransactionClient | import('@prisma/client').PrismaClient} db
+ * @param {string} accountId
+ */
+async function throwIfCannotEnablePreventNegativeCashBalance(db, accountId) {
+  const account = await db.account.findFirst({
+    where: { id: accountId, deletedAt: null },
+    select: { walletsEnabled: true, walletMigrationPending: true },
+  });
+  if (!account) return;
+
+  const bookMinor = await getAccountCashBalanceMinor(db, accountId);
+  const walletsLive =
+    account.walletsEnabled || account.walletMigrationPending;
+
+  const sentences = [];
+  if (bookMinor < 0) {
+    sentences.push(
+      "The account's overall cash (income minus expenses) is still below zero."
+    );
+  }
+
+  if (walletsLive) {
+    const wallets = await db.accountWallet.findMany({
+      where: { accountId, deletedAt: null },
+      select: { id: true },
+    });
+    let anyWalletNegative = false;
+    for (const w of wallets) {
+      const wBal = await walletBalanceMinor(db, w.id);
+      if (wBal < 0) {
+        anyWalletNegative = true;
+        break;
+      }
+    }
+    if (anyWalletNegative) {
+      sentences.push(
+        "At least one wallet still has a negative balance—every wallet must be zero or above."
+      );
+    }
+  }
+
+  if (sentences.length === 0) return;
+
+  const err = new Error(
+    `Cannot turn on "prevent negative cash balance" yet. ${sentences.join(
+      " "
+    )} Correct your ledger so the account and each wallet are not negative, then try again.`
+  );
+  err.code = "NEGATIVE_BALANCE_FOR_LOCK";
+  throw err;
+}
+
 module.exports = {
   getAccountCashBalanceMinor,
   throwIfExpenseWouldCauseNegativeCashBalance,
+  throwIfCannotEnablePreventNegativeCashBalance,
 };
