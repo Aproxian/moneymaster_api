@@ -2,6 +2,9 @@ const { Router } = require("express");
 const { z } = require("zod");
 
 const { prisma } = require("../prisma");
+const {
+  throwIfExpenseWouldCauseNegativeCashBalance,
+} = require("../services/nonNegativeCashBalance");
 
 /**
  * @param {string} accountId
@@ -524,6 +527,21 @@ transactionsRouter.post("/", async (req, res, next) => {
     }
 
     const occurredAt = body.occurredAt ?? new Date();
+
+    if (body.type === "EXPENSE") {
+      try {
+        await throwIfExpenseWouldCauseNegativeCashBalance(
+          prisma,
+          accountId,
+          body.amountMinor
+        );
+      } catch (e) {
+        if (e && e.code === "NEGATIVE_CASH_BALANCE") {
+          return res.status(400).json({ error: e.message });
+        }
+        throw e;
+      }
+    }
 
     const tx = await prisma.transaction.create({
       data: {

@@ -1,3 +1,7 @@
+const {
+  throwIfExpenseWouldCauseNegativeCashBalance,
+} = require("./nonNegativeCashBalance");
+
 /**
  * Creates a ledger row from a stored schedule payload (same rules as manual POST routes).
  * @param {import('@prisma/client').Prisma.TransactionClient} tx
@@ -42,6 +46,10 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
     });
     if (!category || category.internalKey) throw new Error("BAD_CATEGORY");
     if (category.type !== type) throw new Error("CATEGORY_TYPE_MISMATCH");
+
+    if (type === "EXPENSE") {
+      await throwIfExpenseWouldCauseNegativeCashBalance(tx, accountId, amountMinor);
+    }
 
     const row = await tx.transaction.create({
       data: {

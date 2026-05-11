@@ -187,4 +187,108 @@ scheduledTransactionsRouter.post("/:scheduleId/cancel", async (req, res, next) =
   }
 });
 
+const patchTimingDelaySchema = z.object({
+  executeAt: z.coerce.date(),
+});
+
+const patchTimingRecurringSchema = z.object({
+  nextRunAt: z.coerce.date(),
+  hourOfDay: z.number().int().min(0).max(23).optional().nullable(),
+});
+
+/** Update only when the schedule runs (executeAt / nextRunAt; optional UTC hour for recurring day+). */
+scheduledTransactionsRouter.patch("/:scheduleId/timing", async (req, res, next) => {
+  try {
+    const { accountId, scheduleId } = req.params;
+    const userId = req.auth.userId;
+    const now = Date.now();
+    const minLeadMs = 2000;
+
+    const row = await prisma.pendingTransactionSchedule.findFirst({
+      where: { id: scheduleId, accountId, status: "PENDING", cancelledAt: null },
+      select: {
+        id: true,
+        kind: true,
+        recurrenceUnit: true,
+      },
+    });
+    if (!row) return res.status(404).json({ error: "Schedule not found" });
+
+    if (row.kind === "DELAY_ONCE") {
+      const body = patchTimingDelaySchema.parse(req.body);
+      if (body.executeAt.getTime() <= now + minLeadMs) {
+        return res.status(400).json({ error: "Choose a date and time in the future" });
+      }
+      const updated = await prisma.pendingTransactionSchedule.update({
+        where: { id: scheduleId },
+        data: {
+          executeAt: body.executeAt,
+          nextRunAt: body.executeAt,
+        },
+        select: {
+          id: true,
+          executeAt: true,
+          nextRunAt: true,
+        },
+      });
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: "UPDATE",
+          entity: "PendingTransactionSchedule",
+          entityId: scheduleId,
+          meta: { accountId, timing: true, kind: "DELAY_ONCE" },
+        },
+      });
+      return res.json({
+        schedule: {
+          id: updated.id,
+          executeAt: updated.executeAt.toISOString(),
+          nextRunAt: updated.nextRunAt.toISOString(),
+        },
+      });
+    }
+
+    const body = patchTimingRecurringSchema.parse(req.body);
+    if (body.nextRunAt.getTime() <= now + minLeadMs) {
+      return res.status(400).json({ error: "Choose a date and time in the future" });
+    }
+
+    const data = { nextRunAt: body.nextRunAt };
+    if (row.recurrenceUnit && row.recurrenceUnit !== "HOUR" && body.hourOfDay !== undefined) {
+      data.hourOfDay = body.hourOfDay;
+    }
+
+    const updated = await prisma.pendingTransactionSchedule.update({
+      where: { id: scheduleId },
+      data,
+      select: {
+        id: true,
+        nextRunAt: true,
+        hourOfDay: true,
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        userId,
+        action: "UPDATE",
+        entity: "PendingTransactionSchedule",
+        entityId: scheduleId,
+        meta: { accountId, timing: true, kind: "RECURRING" },
+      },
+    });
+
+    return res.json({
+      schedule: {
+        id: updated.id,
+        nextRunAt: updated.nextRunAt.toISOString(),
+        hourOfDay: updated.hourOfDay,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = { scheduledTransactionsRouter };

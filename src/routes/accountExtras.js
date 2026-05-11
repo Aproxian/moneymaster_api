@@ -8,6 +8,9 @@ const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { ensureTransferCategories } = require("../services/ensureTransferCategories");
 const { seedDefaultWallets } = require("../services/seedDefaultWallets");
 const { walletBalanceMinor } = require("../services/walletBalance");
+const {
+  throwIfExpenseWouldCauseNegativeCashBalance,
+} = require("../services/nonNegativeCashBalance");
 
 const accountExtrasRouter = Router({ mergeParams: true });
 
@@ -699,6 +702,12 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
       : Math.round(body.amountMinor * fxRate);
 
     const result = await prisma.$transaction(async (tx) => {
+      await throwIfExpenseWouldCauseNegativeCashBalance(
+        tx,
+        fromAccount.id,
+        body.amountMinor
+      );
+
       const { sendCategoryId } = await ensureTransferCategories(tx, accountId);
       const { receiveCategoryId } = await ensureTransferCategories(tx, toAccount.id);
 
@@ -762,6 +771,9 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
 
     return res.status(201).json(result);
   } catch (err) {
+    if (err && err.code === "NEGATIVE_CASH_BALANCE") {
+      return res.status(400).json({ error: err.message });
+    }
     next(err);
   }
 });

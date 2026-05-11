@@ -2,6 +2,9 @@ const { Router } = require("express");
 const { z } = require("zod");
 
 const { prisma } = require("../prisma");
+const {
+  throwIfExpenseWouldCauseNegativeCashBalance,
+} = require("../services/nonNegativeCashBalance");
 const { requireAuth } = require("../middleware/auth");
 
 const transfersRouter = Router();
@@ -147,6 +150,12 @@ transfersRouter.post("/", async (req, res, next) => {
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      await throwIfExpenseWouldCauseNegativeCashBalance(
+        tx,
+        fromAccount.id,
+        body.amountMinor
+      );
+
       const toAmountMinor = sameCurrency
         ? body.amountMinor
         : Math.round(body.amountMinor * fxRate);
@@ -218,6 +227,9 @@ transfersRouter.post("/", async (req, res, next) => {
 
     return res.status(201).json(result);
   } catch (err) {
+    if (err && err.code === "NEGATIVE_CASH_BALANCE") {
+      return res.status(400).json({ error: err.message });
+    }
     next(err);
   }
 });

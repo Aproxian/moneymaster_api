@@ -34,6 +34,7 @@ async function loadAccountDetail(prismaClient, accountId, userId, memberRole) {
       investingEnabled: true,
       walletsEnabled: true,
       walletMigrationPending: true,
+      preventNegativeCashBalance: true,
       isBusiness: true,
       companyName: true,
       companyLegalName: true,
@@ -93,6 +94,7 @@ const patchAccountSchema = z.object({
   startWalletMigration: z.boolean().optional(),
   completeWalletMigration: z.boolean().optional(),
   cancelWalletMigration: z.boolean().optional(),
+  preventNegativeCashBalance: z.boolean().optional(),
 });
 
 const addMemberSchema = z.object({
@@ -488,6 +490,10 @@ accountsRouter.patch(
         data.companyAddress = body.companyAddress?.trim() || null;
       }
       if (body.companyNotes !== undefined) data.companyNotes = body.companyNotes?.trim() || null;
+
+      if (body.preventNegativeCashBalance !== undefined) {
+        data.preventNegativeCashBalance = body.preventNegativeCashBalance;
+      }
 
       if (body.isBusiness === false) {
         data.companyName = null;

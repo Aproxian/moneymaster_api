@@ -147,6 +147,8 @@ model Account {
   walletMigrationPending Boolean @default(false)
   /// When false, investment UI and flows are hidden; no holdings may remain before turning off.
   investingEnabled Boolean @default(true)
+  /// When true, expenses and outgoing cross-account transfers cannot bring (income − expense) cash balance below zero.
+  preventNegativeCashBalance Boolean @default(false)
   isBusiness Boolean  @default(false)
   companyName      String? @db.VarChar(200)
   companyLegalName String? @db.VarChar(200)
