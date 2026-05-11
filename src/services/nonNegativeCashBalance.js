@@ -1,3 +1,5 @@
+const { walletBalanceMinor } = require("./walletBalance");
+
 /**
  * Cash balance matches dashboard overview: sum(INCOME) − sum(EXPENSE), non-revoked rows only.
  * INVESTMENT rows are excluded from this metric.
@@ -29,15 +31,26 @@ async function getAccountCashBalanceMinor(db, accountId) {
 }
 
 /**
- * Throws if creating an EXPENSE of expenseAmountMinor would push cash balance below zero.
+ * Throws if an expense would push overall cash or (when targeted) a wallet pile below zero.
+ * Mirrors real cash: book-level income−expense cannot go negative; with wallets, each wallet pile cannot either.
  * No-op when {@link Account.preventNegativeCashBalance} is false.
  *
  * @param {import('@prisma/client').Prisma.TransactionClient | import('@prisma/client').PrismaClient} db
+ * @param {string | null | undefined} walletId expense wallet when wallets are used
  */
-async function throwIfExpenseWouldCauseNegativeCashBalance(db, accountId, expenseAmountMinor) {
+async function throwIfExpenseWouldCauseNegativeCashBalance(
+  db,
+  accountId,
+  expenseAmountMinor,
+  walletId = null
+) {
   const account = await db.account.findFirst({
     where: { id: accountId, deletedAt: null },
-    select: { preventNegativeCashBalance: true },
+    select: {
+      preventNegativeCashBalance: true,
+      walletsEnabled: true,
+      walletMigrationPending: true,
+    },
   });
   if (!account?.preventNegativeCashBalance) return;
 
@@ -48,6 +61,19 @@ async function throwIfExpenseWouldCauseNegativeCashBalance(db, accountId, expens
     );
     err.code = "NEGATIVE_CASH_BALANCE";
     throw err;
+  }
+
+  const walletsLive =
+    account.walletsEnabled || account.walletMigrationPending;
+  if (walletsLive && walletId) {
+    const wBal = await walletBalanceMinor(db, walletId);
+    if (wBal - expenseAmountMinor < 0) {
+      const err = new Error(
+        "Not enough balance in this wallet for this amount"
+      );
+      err.code = "NEGATIVE_CASH_BALANCE";
+      throw err;
+    }
   }
 }
 

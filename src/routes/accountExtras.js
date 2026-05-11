@@ -591,6 +591,13 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
           accountId
         );
 
+        await throwIfExpenseWouldCauseNegativeCashBalance(
+          tx,
+          accountId,
+          body.amountMinor,
+          body.fromWalletId
+        );
+
         const outTx = await tx.transaction.create({
           data: {
             accountId,
@@ -705,7 +712,8 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
       await throwIfExpenseWouldCauseNegativeCashBalance(
         tx,
         fromAccount.id,
-        body.amountMinor
+        body.amountMinor,
+        body.fromWalletId ?? null
       );
 
       const { sendCategoryId } = await ensureTransferCategories(tx, accountId);

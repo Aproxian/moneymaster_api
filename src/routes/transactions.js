@@ -533,7 +533,8 @@ transactionsRouter.post("/", async (req, res, next) => {
         await throwIfExpenseWouldCauseNegativeCashBalance(
           prisma,
           accountId,
-          body.amountMinor
+          body.amountMinor,
+          walletId
         );
       } catch (e) {
         if (e && e.code === "NEGATIVE_CASH_BALANCE") {

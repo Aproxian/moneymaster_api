@@ -48,7 +48,12 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
     if (category.type !== type) throw new Error("CATEGORY_TYPE_MISMATCH");
 
     if (type === "EXPENSE") {
-      await throwIfExpenseWouldCauseNegativeCashBalance(tx, accountId, amountMinor);
+      await throwIfExpenseWouldCauseNegativeCashBalance(
+        tx,
+        accountId,
+        amountMinor,
+        walletId
+      );
     }
 
     const row = await tx.transaction.create({

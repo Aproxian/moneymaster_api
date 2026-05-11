@@ -153,7 +153,8 @@ transfersRouter.post("/", async (req, res, next) => {
       await throwIfExpenseWouldCauseNegativeCashBalance(
         tx,
         fromAccount.id,
-        body.amountMinor
+        body.amountMinor,
+        body.fromWalletId ?? null
       );
 
       const toAmountMinor = sameCurrency
