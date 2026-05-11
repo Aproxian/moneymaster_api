@@ -12,18 +12,17 @@ const MAX_BURST = 500;
 async function processPendingSchedulesForUser(userId) {
   const now = new Date();
 
+  /** Use nextRunAt for all kinds (DELAY_ONCE sets it equal to executeAt). Relying only on
+   * executeAt missed rows when executeAt was null or out of sync in older data. */
   const schedules = await prisma.pendingTransactionSchedule.findMany({
     where: {
       status: "PENDING",
       cancelledAt: null,
+      nextRunAt: { lte: now },
       account: {
         deletedAt: null,
         members: { some: { userId } },
       },
-      OR: [
-        { kind: "DELAY_ONCE", executeAt: { lte: now } } ,
-        { kind: "RECURRING", nextRunAt: { lte: now } } ,
-      ],
     },
     orderBy: [{ nextRunAt: "asc" }, { createdAt: "asc" }],
     take: 200,
@@ -38,13 +37,14 @@ async function processPendingSchedulesForUser(userId) {
         if (!fresh) return;
 
         if (fresh.kind === "DELAY_ONCE") {
-          const at = fresh.executeAt ?? fresh.nextRunAt;
+          const at = fresh.nextRunAt ?? fresh.executeAt;
           if (!at || at > now) return;
           await materializeScheduledPayload(tx, {
             accountId: fresh.accountId,
             userId: fresh.createdByUserId,
             occurredAt: at,
             payload: fresh.payload,
+            scheduleKind: fresh.kind,
           });
           await tx.pendingTransactionSchedule.update({
             where: { id: fresh.id },
@@ -63,6 +63,7 @@ async function processPendingSchedulesForUser(userId) {
               userId: fresh.createdByUserId,
               occurredAt: new Date(slot),
               payload: fresh.payload,
+              scheduleKind: fresh.kind,
             });
             runs += 1;
             slot = advanceScheduleUtc(

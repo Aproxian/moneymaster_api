@@ -13,7 +13,7 @@ function requireAccountMember(paramName = "accountId") {
       select: { role: true },
     });
 
-    if (!member) return res.status(403).json({ error: "Not a member of this account" });
+    if (!member) return res.status(403).json({ error: "Not a member of this account", code: "NOT_ACCOUNT_MEMBER" });
 
     req.memberRole = member.role;
     next();

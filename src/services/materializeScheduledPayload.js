@@ -1,9 +1,9 @@
 /**
  * Creates a ledger row from a stored schedule payload (same rules as manual POST routes).
  * @param {import('@prisma/client').Prisma.TransactionClient} tx
- * @param {{ accountId: string; userId: string; occurredAt: Date; payload: Record<string, unknown> }} args
+ * @param {{ accountId: string; userId: string; occurredAt: Date; payload: Record<string, unknown>; scheduleKind?: 'DELAY_ONCE' | 'RECURRING' }} args
  */
-async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, payload }) {
+async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, payload, scheduleKind }) {
   const tab = payload.tab;
   const amountMinor = Number(payload.amountMinor);
   const categoryId = typeof payload.categoryId === "string" ? payload.categoryId : null;
@@ -54,6 +54,7 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
         categoryId,
         createdByUserId: userId,
         walletId: walletId || null,
+        ...(scheduleKind ? { scheduleOriginKind: scheduleKind } : {}),
       },
     });
     await tx.auditLog.create({
@@ -101,6 +102,7 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
         instrumentId: instrument.id,
         investmentQuantity: quantity,
         walletId: walletId || null,
+        ...(scheduleKind ? { scheduleOriginKind: scheduleKind } : {}),
       },
     });
 

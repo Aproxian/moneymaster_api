@@ -88,6 +88,11 @@ meRouter.get("/me", requireAuth, async (req, res) => {
 
   if (!user) return res.status(401).json({ error: "Unauthorized" });
 
+  await processPendingSchedulesForUser(userId).catch((err) => {
+    // eslint-disable-next-line no-console -- operational visibility
+    console.error("[schedules] GET /me", err?.message || err);
+  });
+
   return res.json({
     user: {
       ...user,
@@ -165,6 +170,45 @@ meRouter.post("/me/process-schedules", requireAuth, async (req, res, next) => {
     await processPendingSchedulesForUser(req.auth.userId);
     return res.status(204).send();
   } catch (err) {
+    next(err);
+  }
+});
+
+meRouter.get("/me/membership-notices", requireAuth, async (req, res, next) => {
+  try {
+    const rows = await prisma.membershipNotice.findMany({
+      where: { userId: req.auth.userId },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        kind: true,
+        accountId: true,
+        accountName: true,
+        createdAt: true,
+      },
+    });
+    return res.json({
+      notices: rows.map((r) => ({
+        ...r,
+        createdAt: r.createdAt.toISOString(),
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+meRouter.post("/me/membership-notices/ack", requireAuth, async (req, res, next) => {
+  try {
+    const body = z.object({ ids: z.array(z.string().min(1)).min(1) }).parse(req.body ?? {});
+    await prisma.membershipNotice.deleteMany({
+      where: { userId: req.auth.userId, id: { in: body.ids } },
+    });
+    return res.status(204).send();
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: "Invalid body", details: err.flatten() });
+    }
     next(err);
   }
 });

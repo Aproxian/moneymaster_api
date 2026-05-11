@@ -122,7 +122,10 @@ authRouter.post("/register", async (req, res, next) => {
 
     const accessToken = signAccessToken(result.user.id);
 
-    await processPendingSchedulesForUser(result.user.id).catch(() => {});
+    await processPendingSchedulesForUser(result.user.id).catch((err) => {
+      // eslint-disable-next-line no-console -- operational visibility
+      console.error("[schedules] register hook", err?.message || err);
+    });
 
     return res.status(201).json({
       user: {
@@ -193,7 +196,10 @@ authRouter.post("/login", async (req, res, next) => {
       },
     });
 
-    await processPendingSchedulesForUser(user.id).catch(() => {});
+    await processPendingSchedulesForUser(user.id).catch((err) => {
+      // eslint-disable-next-line no-console -- operational visibility
+      console.error("[schedules] login hook", err?.message || err);
+    });
 
     return res.json({
       user: {
@@ -269,7 +275,10 @@ authRouter.post("/refresh", async (req, res, next) => {
       }
     );
 
-    await processPendingSchedulesForUser(refreshedUserId).catch(() => {});
+    await processPendingSchedulesForUser(refreshedUserId).catch((err) => {
+      // eslint-disable-next-line no-console -- operational visibility
+      console.error("[schedules] refresh hook", err?.message || err);
+    });
 
     return res.json({ accessToken, refreshToken: newRefreshToken });
   } catch (err) {

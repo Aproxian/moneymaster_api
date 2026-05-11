@@ -71,6 +71,11 @@ enum RecurrenceUnit {
   YEAR
 }
 
+enum MembershipNoticeKind {
+  REMOVED
+  ACCOUNT_DELETED
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -98,8 +103,22 @@ model User {
   createdTransactions Transaction[]           @relation("TxCreatedBy")
   currencyChanges     AccountCurrencyChange[] @relation("CurrencyChangedBy")
   schedulesCreated    PendingTransactionSchedule[] @relation("ScheduleCreatedBy")
+  membershipNotices   MembershipNotice[]
 
   @@index([deletedAt])
+}
+
+model MembershipNotice {
+  id          String               @id @default(cuid())
+  userId      String
+  kind        MembershipNoticeKind
+  accountId   String
+  accountName String?              @db.VarChar(200)
+  createdAt   DateTime             @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Session {
@@ -281,6 +300,8 @@ model Transaction {
   deletedAt DateTime?
   /// When set, excluded from balances and wheel; still listed in history until hard-deleted.
   revokedAt DateTime?
+  /// When set, ledger row was created from schedule materialization (delayed once vs recurring).
+  scheduleOriginKind ScheduleKind?
 
   account  Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
   category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)

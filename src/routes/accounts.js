@@ -239,6 +239,7 @@ accountsRouter.get(
         orderBy: { joinedAt: "asc" },
       });
 
+      res.set("Cache-Control", "no-store, private");
       return res.json({ members });
     } catch (err) {
       next(err);
@@ -340,8 +341,22 @@ accountsRouter.delete(
         return res.status(400).json({ error: "Cannot remove the only owner of this account" });
       }
 
+      const accountBrief = await prisma.account.findFirst({
+        where: { id: accountId },
+        select: { name: true },
+      });
+
       await prisma.accountMember.delete({
         where: { userId_accountId: { userId: memberUserId, accountId } },
+      });
+
+      await prisma.membershipNotice.create({
+        data: {
+          userId: memberUserId,
+          kind: "REMOVED",
+          accountId,
+          accountName: accountBrief?.name ?? null,
+        },
       });
 
       await prisma.auditLog.create({
@@ -623,6 +638,11 @@ accountsRouter.get(
         walletIdFilter = walletIdRaw;
       }
 
+      /** All-wallets (*): omit same-account wallet↔wallet legs; cross-account transfers use transferGroupId only. */
+      const omitWalletInternalTransferPairs =
+        !walletIdFilter &&
+        (account.walletsEnabled || account.walletMigrationPending);
+
       const fromParam = req.query.from;
       const toParam = req.query.to;
 
@@ -645,6 +665,7 @@ accountsRouter.get(
         deletedAt: null,
         revokedAt: null,
         ...(walletIdFilter ? { walletId: walletIdFilter } : {}),
+        ...(omitWalletInternalTransferPairs ? { transferPairId: null } : {}),
         ...(from || to
           ? {
               occurredAt: {
@@ -933,15 +954,32 @@ accountsRouter.delete(
 
       const existing = await prisma.account.findFirst({
         where: { id: accountId, deletedAt: null },
-        select: { id: true },
+        select: { id: true, name: true },
       });
 
       if (!existing) return res.status(404).json({ error: "Account not found" });
+
+      const otherMembers = await prisma.accountMember.findMany({
+        where: { accountId },
+        select: { userId: true },
+      });
 
       await prisma.account.update({
         where: { id: accountId },
         data: { deletedAt: new Date() },
       });
+
+      const noticeRows = otherMembers
+        .filter((m) => m.userId !== userId)
+        .map((m) => ({
+          userId: m.userId,
+          kind: "ACCOUNT_DELETED",
+          accountId,
+          accountName: existing.name ?? null,
+        }));
+      if (noticeRows.length > 0) {
+        await prisma.membershipNotice.createMany({ data: noticeRows });
+      }
 
       return res.status(204).send();
     } catch (err) {

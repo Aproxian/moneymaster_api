@@ -2,6 +2,54 @@ const { Router } = require("express");
 const { z } = require("zod");
 
 const { prisma } = require("../prisma");
+
+/**
+ * @param {string} accountId
+ * @param {Array<object & { transferGroupId?: string | null }>} rows
+ */
+async function attachTransferPeerAccountNames(accountId, rows) {
+  if (!rows?.length) return rows;
+  const groupIds = [...new Set(rows.map((r) => r.transferGroupId).filter(Boolean))];
+  if (groupIds.length === 0) return rows;
+
+  const groups = await prisma.transferGroup.findMany({
+    where: { id: { in: groupIds } },
+    select: {
+      id: true,
+      fromAccountId: true,
+      toAccountId: true,
+    },
+  });
+  const byGroupId = new Map(groups.map((g) => [g.id, g]));
+
+  const peerIds = [
+    ...new Set(
+      groups.map((g) => (accountId === g.fromAccountId ? g.toAccountId : g.fromAccountId))
+    ),
+  ];
+
+  const peerRows =
+    peerIds.length === 0
+      ? []
+      : await prisma.account.findMany({
+          where: { id: { in: peerIds } },
+          select: { id: true, name: true },
+        });
+  const nameByPeerId = new Map(peerRows.map((a) => [a.id, a.name]));
+
+  return rows.map((t) => {
+    if (!t.transferGroupId || !byGroupId.has(t.transferGroupId)) return t;
+    const g = byGroupId.get(t.transferGroupId);
+    const peerAccountId =
+      accountId === g.fromAccountId ? g.toAccountId : g.fromAccountId;
+    const peerName = nameByPeerId.get(peerAccountId)?.trim();
+    return {
+      ...t,
+      transferPeerAccountName: peerName || null,
+    };
+  });
+}
+
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 
@@ -158,7 +206,7 @@ transactionsRouter.get("/", async (req, res, next) => {
       total = await prisma.transaction.count({ where });
     }
 
-    const transactions = await prisma.transaction.findMany({
+    let transactions = await prisma.transaction.findMany({
       where,
       select: {
         id: true,
@@ -176,11 +224,14 @@ transactionsRouter.get("/", async (req, res, next) => {
         revokedAt: true,
         createdAt: true,
         updatedAt: true,
+        scheduleOriginKind: true,
       },
       orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
       take,
       ...(pagedList ? { skip: offset } : {}),
     });
+
+    transactions = await attachTransferPeerAccountNames(accountId, transactions);
 
     const hasMore = pagedList ? offset + transactions.length < total : false;
 
@@ -292,6 +343,7 @@ transactionsRouter.get("/:transactionId", async (req, res, next) => {
         revokedAt: true,
         createdAt: true,
         updatedAt: true,
+        scheduleOriginKind: true,
         category: {
           select: {
             id: true,
@@ -320,6 +372,8 @@ transactionsRouter.get("/:transactionId", async (req, res, next) => {
     if (!row) {
       return res.status(404).json({ error: "Transaction not found" });
     }
+
+    const [txRow] = await attachTransferPeerAccountNames(accountId, [row]);
 
     const accRow = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
@@ -393,6 +447,8 @@ transactionsRouter.get("/:transactionId", async (req, res, next) => {
         revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
         createdAt: row.createdAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
+        scheduleOriginKind: row.scheduleOriginKind ?? null,
+        transferPeerAccountName: txRow.transferPeerAccountName ?? null,
         category: row.category,
         instrument: row.instrument,
         holdingContext,
