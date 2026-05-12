@@ -237,6 +237,8 @@ model Category {
   accountId String
   type      TxType?
   name      String
+  /// Order within the same `type` on the Categories screen (lower = first).
+  sortOrder Int       @default(0)
   /// System use: e.g. INV_STOCKS, CASH_OUT_INVESTMENT. Omitted for user-created categories.
   internalKey String? @db.VarChar(64)
   icon      String?
@@ -252,6 +254,7 @@ model Category {
 
   @@unique([accountId, type, name])
   @@index([accountId])
+  @@index([accountId, type, sortOrder])
   @@index([deletedAt])
 }
 

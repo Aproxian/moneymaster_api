@@ -8,6 +8,7 @@ const {
  * @param {string} accountId
  */
 async function ensureInvestmentCategories(tx, accountId) {
+  let invOrder = 0;
   const rows = [
     ...INVESTMENT_DEFAULT_ROWS.map((r) => ({
       accountId,
@@ -15,6 +16,7 @@ async function ensureInvestmentCategories(tx, accountId) {
       name: r.name,
       icon: r.icon,
       internalKey: r.key,
+      sortOrder: invOrder++,
     })),
     {
       accountId,
@@ -22,6 +24,7 @@ async function ensureInvestmentCategories(tx, accountId) {
       name: "Cash Out Investment",
       icon: "🔁",
       internalKey: CASH_OUT_INVESTMENT,
+      sortOrder: 9000,
     },
   ];
   await tx.category.createMany({

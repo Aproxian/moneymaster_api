@@ -336,7 +336,7 @@ accountExtrasRouter.get("/search", async (req, res, next) => {
         internalKey: true,
       },
       take: 40,
-      orderBy: { name: "asc" },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
     });
 
     const noteTransactions = await prisma.transaction.findMany({

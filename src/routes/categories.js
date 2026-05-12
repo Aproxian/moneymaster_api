@@ -23,20 +23,28 @@ const updateCategorySchema = z.object({
   color: z.string().max(20).optional().nullable(),
 });
 
+const reorderCategoriesSchema = z.object({
+  type: z.enum(["INCOME", "EXPENSE", "INVESTMENT"]),
+  orderedCategoryIds: z.array(z.string().min(1)),
+});
+
 categoriesRouter.use(requireAuth);
 categoriesRouter.use(requireAccountMember("accountId"));
 
-async function listVisibleCategories(accountId) {
-  // MySQL: `NOT (internalKey = 'X')` excludes rows where internalKey IS NULL, so default
-  // categories (internalKey null) vanished from the list. Exclude only the cash-out row.
-  return prisma.category.findMany({
-    where: {
-      accountId,
-      deletedAt: null,
-      NOT: {
-        AND: [{ internalKey: { not: null } }, { internalKey: CASH_OUT_INVESTMENT }],
-      },
+/** Categories shown on the Categories screen (excludes hidden system rows such as cash-out). */
+function visibleCategoriesWhere(accountId) {
+  return {
+    accountId,
+    deletedAt: null,
+    NOT: {
+      AND: [{ internalKey: { not: null } }, { internalKey: CASH_OUT_INVESTMENT }],
     },
+  };
+}
+
+async function listVisibleCategories(accountId) {
+  return prisma.category.findMany({
+    where: visibleCategoriesWhere(accountId),
     select: {
       id: true,
       type: true,
@@ -44,10 +52,11 @@ async function listVisibleCategories(accountId) {
       icon: true,
       color: true,
       internalKey: true,
+      sortOrder: true,
       createdAt: true,
       updatedAt: true,
     },
-    orderBy: { name: "asc" },
+    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
   });
 }
 
@@ -106,6 +115,66 @@ categoriesRouter.get("/", async (req, res, next) => {
       investingEnabled,
     });
   } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * PUT /accounts/:accountId/categories/reorder
+ * Sets `sortOrder` to each category's index in `orderedCategoryIds` (must list every visible
+ * category of that `type` exactly once, same set as GET /categories for that type).
+ */
+categoriesRouter.put("/reorder", async (req, res, next) => {
+  try {
+    const { accountId } = req.params;
+    const userId = req.auth.userId;
+    const body = reorderCategoriesSchema.parse(req.body);
+
+    const expectedRows = await prisma.category.findMany({
+      where: {
+        ...visibleCategoriesWhere(accountId),
+        type: body.type,
+      },
+      select: { id: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    });
+    const expectedIds = new Set(expectedRows.map((r) => r.id));
+    if (body.orderedCategoryIds.length !== expectedIds.size) {
+      return res.status(400).json({
+        error:
+          "orderedCategoryIds must list every category of this type exactly once (same count as on the Categories screen)",
+      });
+    }
+    for (const id of body.orderedCategoryIds) {
+      if (!expectedIds.has(id)) {
+        return res.status(400).json({ error: "Unknown category id or wrong type for this reorder" });
+      }
+    }
+
+    await prisma.$transaction(
+      body.orderedCategoryIds.map((id, index) =>
+        prisma.category.update({
+          where: { id },
+          data: { sortOrder: index },
+        })
+      )
+    );
+
+    await prisma.auditLog.create({
+      data: {
+        userId,
+        action: "UPDATE",
+        entity: "CategoryOrder",
+        entityId: accountId,
+        meta: { accountId, type: body.type, count: body.orderedCategoryIds.length },
+      },
+    });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: "Invalid body", details: err.flatten() });
+    }
     next(err);
   }
 });
@@ -280,6 +349,12 @@ categoriesRouter.post("/", async (req, res, next) => {
         .json({ error: "Category with this name already exists for account" });
     }
 
+    const maxRow = await prisma.category.aggregate({
+      where: { accountId, type: body.type, deletedAt: null },
+      _max: { sortOrder: true },
+    });
+    const sortOrder = (maxRow._max.sortOrder ?? -1) + 1;
+
     const category = await prisma.category.create({
       data: {
         accountId,
@@ -287,6 +362,7 @@ categoriesRouter.post("/", async (req, res, next) => {
         name: body.name,
         icon: body.icon,
         color: body.color ?? null,
+        sortOrder,
       },
       select: {
         id: true,
@@ -294,6 +370,7 @@ categoriesRouter.post("/", async (req, res, next) => {
         name: true,
         icon: true,
         color: true,
+        sortOrder: true,
         createdAt: true,
       },
     });
@@ -363,6 +440,7 @@ categoriesRouter.patch("/:categoryId", async (req, res, next) => {
         name: true,
         icon: true,
         color: true,
+        sortOrder: true,
         createdAt: true,
         updatedAt: true,
       },

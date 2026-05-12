@@ -29,12 +29,15 @@ const CORE_DEFAULT_NAMES = CORE_SEED_ROWS.map((r) => r.name);
 async function seedDefaultCategories(tx, accountId, options = {}) {
   const investingEnabled = options.investingEnabled !== false;
 
+  let expenseOrder = 0;
+  let incomeOrder = 0;
   await tx.category.createMany({
     data: CORE_SEED_ROWS.map((row) => ({
       accountId,
       type: row.type,
       name: row.name,
       icon: row.icon,
+      sortOrder: row.type === "EXPENSE" ? expenseOrder++ : incomeOrder++,
     })),
     skipDuplicates: true,
   });
