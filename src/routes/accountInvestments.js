@@ -4,6 +4,7 @@ const { z } = require("zod");
 const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
+const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 
 // Mounted at /accounts/:accountId/investments
 const accountInvestmentsRouter = Router({ mergeParams: true });
@@ -67,7 +68,10 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
       },
       select: {
         id: true,
+        type: true,
+        internalKey: true,
         lockedForManualEntry: true,
+        memberAccessRestricted: true,
       },
     });
 
@@ -77,10 +81,20 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
       });
     }
 
-    if (category.lockedForManualEntry) {
-      return res.status(400).json({
-        error: "This category is locked and cannot be used for manual investments",
-      });
+    try {
+      await assertCategoryManualMemberAccess(prisma, { accountId, userId, category });
+    } catch (e) {
+      if (e && e.statusCode === 403) {
+        return res.status(403).json({ error: "You do not have access to this category" });
+      }
+      if (e && e.statusCode === 400) {
+        if (e.message === "MANUAL_LOCKED") {
+          return res.status(400).json({
+            error: "This category is locked and cannot be used for manual investments",
+          });
+        }
+      }
+      throw e;
     }
 
     let walletId = body.walletId ?? null;

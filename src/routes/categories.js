@@ -6,6 +6,14 @@ const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { seedDefaultCategories } = require("../services/seedDefaultCategories");
+const {
+  accountIsPersonalForUser,
+  canConfigureCategoryMemberAccess,
+  computeManualEntryAllowedForMe,
+  getCategoryMemberAccessState,
+  getPrimaryOwnerUserId,
+  setCategoryMemberAccess,
+} = require("../services/categoryMemberAccess");
 
 // Mounted at /accounts/:accountId/categories
 const categoriesRouter = Router({ mergeParams: true });
@@ -27,6 +35,12 @@ const updateCategorySchema = z.object({
 const reorderCategoriesSchema = z.object({
   type: z.enum(["INCOME", "EXPENSE", "INVESTMENT"]),
   orderedCategoryIds: z.array(z.string().min(1)),
+});
+
+const putMemberAccessSchema = z.object({
+  memberAccessRestricted: z.boolean(),
+  newMembersLockedByDefault: z.boolean(),
+  allowedUserIds: z.array(z.string().min(1)),
 });
 
 categoriesRouter.use(requireAuth);
@@ -54,12 +68,47 @@ async function listVisibleCategories(accountId) {
       color: true,
       internalKey: true,
       lockedForManualEntry: true,
+      createdByUserId: true,
+      memberAccessRestricted: true,
+      newMembersLockedByDefault: true,
       sortOrder: true,
       createdAt: true,
       updatedAt: true,
     },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
   });
+}
+
+async function withCategoryMemberUi(accountId, userId, categories) {
+  const isPersonal = await accountIsPersonalForUser(prisma, userId, accountId);
+  const primaryOwnerUserId = await getPrimaryOwnerUserId(prisma, accountId);
+  const restrictedIds = categories
+    .filter((c) => c.memberAccessRestricted)
+    .map((c) => c.id);
+  let grantSet = new Set();
+  if (!isPersonal && restrictedIds.length) {
+    const grants = await prisma.categoryMemberAccess.findMany({
+      where: { userId, categoryId: { in: restrictedIds } },
+      select: { categoryId: true },
+    });
+    grantSet = new Set(grants.map((g) => g.categoryId));
+  }
+  return categories.map((c) => ({
+    ...c,
+    manualEntryAllowedForMe: computeManualEntryAllowedForMe({
+      category: c,
+      isPersonal,
+      userId,
+      primaryOwnerUserId,
+      hasExplicitGrant: grantSet.has(c.id),
+    }),
+    canConfigureMemberLocks: canConfigureCategoryMemberAccess({
+      isPersonal,
+      category: c,
+      primaryOwnerUserId,
+      userId,
+    }),
+  }));
 }
 
 categoriesRouter.get("/", async (req, res, next) => {
@@ -112,8 +161,11 @@ categoriesRouter.get("/", async (req, res, next) => {
       categories = await listVisibleCategories(accountId);
     }
 
+    const userId = req.auth.userId;
+    const withUi = await withCategoryMemberUi(accountId, userId, categories);
+
     return res.json({
-      categories,
+      categories: withUi,
       investingEnabled,
     });
   } catch (err) {
@@ -173,6 +225,120 @@ categoriesRouter.put("/reorder", async (req, res, next) => {
     });
 
     return res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: "Invalid body", details: err.flatten() });
+    }
+    next(err);
+  }
+});
+
+categoriesRouter.get("/:categoryId/member-access", async (req, res, next) => {
+  try {
+    const { accountId, categoryId } = req.params;
+    const userId = req.auth.userId;
+
+    if (await accountIsPersonalForUser(prisma, userId, accountId)) {
+      return res.status(403).json({ error: "Member access is only available on shared accounts" });
+    }
+
+    const primaryOwnerUserId = await getPrimaryOwnerUserId(prisma, accountId);
+    const category = await prisma.category.findFirst({
+      where: { id: categoryId, accountId, deletedAt: null },
+      select: {
+        id: true,
+        internalKey: true,
+        lockedForManualEntry: true,
+        createdByUserId: true,
+        memberAccessRestricted: true,
+        newMembersLockedByDefault: true,
+      },
+    });
+    if (!category) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    const isPersonal = false;
+    if (
+      !canConfigureCategoryMemberAccess({
+        isPersonal,
+        category,
+        primaryOwnerUserId,
+        userId,
+      })
+    ) {
+      return res.status(403).json({ error: "You cannot change lock settings for this category" });
+    }
+
+    const state = await getCategoryMemberAccessState(prisma, { accountId, categoryId });
+    if (!state) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    return res.json({
+      memberAccessRestricted: state.memberAccessRestricted,
+      newMembersLockedByDefault: state.newMembersLockedByDefault,
+      allowedUserIds: state.allowedUserIds,
+      primaryOwnerUserId: state.primaryOwnerUserId,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+categoriesRouter.put("/:categoryId/member-access", async (req, res, next) => {
+  try {
+    const { accountId, categoryId } = req.params;
+    const userId = req.auth.userId;
+    const body = putMemberAccessSchema.parse(req.body);
+
+    if (await accountIsPersonalForUser(prisma, userId, accountId)) {
+      return res.status(403).json({ error: "Member access is only available on shared accounts" });
+    }
+
+    const primaryOwnerUserId = await getPrimaryOwnerUserId(prisma, accountId);
+    const category = await prisma.category.findFirst({
+      where: { id: categoryId, accountId, deletedAt: null },
+      select: {
+        id: true,
+        internalKey: true,
+        lockedForManualEntry: true,
+        createdByUserId: true,
+        memberAccessRestricted: true,
+        newMembersLockedByDefault: true,
+      },
+    });
+    if (!category) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    const isPersonal = false;
+    if (
+      !canConfigureCategoryMemberAccess({
+        isPersonal,
+        category,
+        primaryOwnerUserId,
+        userId,
+      })
+    ) {
+      return res.status(403).json({ error: "You cannot change lock settings for this category" });
+    }
+
+    await setCategoryMemberAccess(prisma, {
+      accountId,
+      categoryId,
+      allowedUserIds: body.allowedUserIds,
+      memberAccessRestricted: body.memberAccessRestricted,
+      newMembersLockedByDefault: body.newMembersLockedByDefault,
+    });
+
+    const state = await getCategoryMemberAccessState(prisma, { accountId, categoryId });
+    return res.json({
+      memberAccessRestricted: state.memberAccessRestricted,
+      newMembersLockedByDefault: state.newMembersLockedByDefault,
+      allowedUserIds: state.allowedUserIds,
+      primaryOwnerUserId: state.primaryOwnerUserId,
+    });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return res.status(400).json({ error: "Invalid body", details: err.flatten() });
@@ -323,6 +489,7 @@ categoriesRouter.delete("/:categoryId/watchlist/:instrumentId", async (req, res,
 categoriesRouter.post("/", async (req, res, next) => {
   try {
     const { accountId } = req.params;
+    const userId = req.auth.userId;
 
     const body = createCategorySchema.parse(req.body);
 
@@ -365,6 +532,7 @@ categoriesRouter.post("/", async (req, res, next) => {
         icon: body.icon,
         color: body.color ?? null,
         sortOrder,
+        createdByUserId: userId,
       },
       select: {
         id: true,
@@ -375,11 +543,16 @@ categoriesRouter.post("/", async (req, res, next) => {
         sortOrder: true,
         internalKey: true,
         lockedForManualEntry: true,
+        createdByUserId: true,
+        memberAccessRestricted: true,
+        newMembersLockedByDefault: true,
         createdAt: true,
       },
     });
 
-    return res.status(201).json({ category });
+    const [withUi] = await withCategoryMemberUi(accountId, userId, [category]);
+
+    return res.status(201).json({ category: withUi });
   } catch (err) {
     next(err);
   }
@@ -388,6 +561,7 @@ categoriesRouter.post("/", async (req, res, next) => {
 categoriesRouter.patch("/:categoryId", async (req, res, next) => {
   try {
     const { accountId, categoryId } = req.params;
+    const userId = req.auth.userId;
 
     const body = updateCategorySchema.parse(req.body);
 
@@ -455,13 +629,18 @@ categoriesRouter.patch("/:categoryId", async (req, res, next) => {
         color: true,
         internalKey: true,
         lockedForManualEntry: true,
+        createdByUserId: true,
+        memberAccessRestricted: true,
+        newMembersLockedByDefault: true,
         sortOrder: true,
         createdAt: true,
         updatedAt: true,
       },
     });
 
-    return res.json({ category: updated });
+    const [withUi] = await withCategoryMemberUi(accountId, userId, [updated]);
+
+    return res.json({ category: withUi });
   } catch (err) {
     next(err);
   }

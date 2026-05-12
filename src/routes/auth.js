@@ -90,7 +90,7 @@ authRouter.post("/register", async (req, res, next) => {
         data: { personalAccountId: account.id },
       });
 
-      await seedDefaultCategories(tx, account.id, { investingEnabled });
+      await seedDefaultCategories(tx, account.id, { investingEnabled, createdByUserId: user.id });
 
       // Create session
       const refreshToken = makeRefreshToken();

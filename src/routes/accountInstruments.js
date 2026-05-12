@@ -5,6 +5,7 @@ const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
+const { getPrimaryOwnerUserId } = require("../services/categoryMemberAccess");
 const { ensureInvestmentCategories } = require("../services/investingCategories");
 
 const accountInstrumentsRouter = Router({ mergeParams: true });
@@ -216,7 +217,8 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
         select: { id: true },
       });
       if (!cat) {
-        await ensureInvestmentCategories(tx, accountId);
+        const ownerId = await getPrimaryOwnerUserId(tx, accountId);
+        await ensureInvestmentCategories(tx, accountId, { createdByUserId: ownerId });
         cat = await tx.category.findFirst({
           where: {
             accountId,

@@ -98,6 +98,9 @@ model User {
   audits            AuditLog[]
   personalAccount   Account? @relation("UserPersonalAccount", fields: [personalAccountId], references: [id], onDelete: SetNull)
 
+  categoriesCreated       Category[]              @relation("CategoryCreatedBy")
+  categoryMemberAccessRows CategoryMemberAccess[]
+
   // ✅ FIX: add relation name + add the other missing opposite relations
   initiatedTransfers  TransferGroup[]         @relation("InitiatedTransfers")
   createdTransactions Transaction[]           @relation("TxCreatedBy")
@@ -243,6 +246,12 @@ model Category {
   internalKey String? @db.VarChar(64)
   /// When true, cannot be chosen for manual income/expense/investment entries (UI + API). Transfer legs use this; users may toggle for custom categories later.
   lockedForManualEntry Boolean @default(false)
+  /// User who created this row (defaults seeded with the account owner). Null = legacy before tracking.
+  createdByUserId String?
+  /// Shared books only: when true, only the account primary owner + users in `memberAccessGrants` may use this category for manual entries (in addition to `lockedForManualEntry`).
+  memberAccessRestricted Boolean @default(false)
+  /// When `memberAccessRestricted` is true: new members get a grant row unless this is true.
+  newMembersLockedByDefault Boolean @default(false)
   icon      String?
   color     String?
   createdAt DateTime  @default(now())
@@ -250,14 +259,29 @@ model Category {
   deletedAt DateTime?
 
   account      Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  createdBy    User?         @relation("CategoryCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
   transactions Transaction[]
   holdings     Holding[]
   wishlistItems CategoryWishlistItem[]
+  memberAccessGrants CategoryMemberAccess[]
 
   @@unique([accountId, type, name])
   @@index([accountId])
   @@index([accountId, type, sortOrder])
   @@index([deletedAt])
+  @@index([createdByUserId])
+}
+
+/// Per-category manual-entry allow list for shared accounts (`memberAccessRestricted`).
+model CategoryMemberAccess {
+  categoryId String
+  userId     String
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([categoryId, userId])
+  @@index([userId])
 }
 
 model TransferGroup {

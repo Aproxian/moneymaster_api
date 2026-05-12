@@ -1,6 +1,7 @@
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("./nonNegativeCashBalance");
+const { assertCategoryManualMemberAccess } = require("./categoryMemberAccess");
 
 /**
  * Creates a ledger row from a stored schedule payload (same rules as manual POST routes).
@@ -42,10 +43,18 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
     const type = tab === "income" ? "INCOME" : "EXPENSE";
     const category = await tx.category.findFirst({
       where: { id: categoryId, accountId, deletedAt: null },
-      select: { id: true, type: true, internalKey: true, lockedForManualEntry: true },
+      select: {
+        id: true,
+        type: true,
+        internalKey: true,
+        lockedForManualEntry: true,
+        memberAccessRestricted: true,
+      },
     });
     if (!category || category.lockedForManualEntry || category.internalKey) throw new Error("BAD_CATEGORY");
     if (category.type !== type) throw new Error("CATEGORY_TYPE_MISMATCH");
+
+    await assertCategoryManualMemberAccess(tx, { accountId, userId, category });
 
     if (type === "EXPENSE") {
       await throwIfExpenseWouldCauseNegativeCashBalance(
@@ -98,10 +107,18 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
 
     const category = await tx.category.findFirst({
       where: { id: categoryId, accountId, type: "INVESTMENT", deletedAt: null },
-      select: { id: true, lockedForManualEntry: true },
+      select: {
+        id: true,
+        type: true,
+        internalKey: true,
+        lockedForManualEntry: true,
+        memberAccessRestricted: true,
+      },
     });
     if (!category) throw new Error("BAD_INV_CATEGORY");
     if (category.lockedForManualEntry) throw new Error("BAD_INV_CATEGORY");
+
+    await assertCategoryManualMemberAccess(tx, { accountId, userId, category });
 
     const txRow = await tx.transaction.create({
       data: {

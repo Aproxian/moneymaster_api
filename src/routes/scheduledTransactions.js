@@ -4,6 +4,7 @@ const { z } = require("zod");
 const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
+const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 
 const scheduledTransactionsRouter = Router({ mergeParams: true });
 
@@ -99,6 +100,53 @@ scheduledTransactionsRouter.post("/", async (req, res, next) => {
     }
     if (!account.walletsEnabled && payload.walletId) {
       return res.status(400).json({ error: "walletId is not used when wallets are disabled" });
+    }
+
+    const tab = payload.tab;
+    let category;
+    if (tab === "income" || tab === "expense") {
+      const type = tab === "income" ? "INCOME" : "EXPENSE";
+      category = await prisma.category.findFirst({
+        where: { id: payload.categoryId, accountId, deletedAt: null, type },
+        select: {
+          id: true,
+          type: true,
+          internalKey: true,
+          lockedForManualEntry: true,
+          memberAccessRestricted: true,
+        },
+      });
+      if (!category) {
+        return res.status(400).json({ error: "Invalid category for schedule payload" });
+      }
+    } else {
+      category = await prisma.category.findFirst({
+        where: { id: payload.categoryId, accountId, deletedAt: null, type: "INVESTMENT" },
+        select: {
+          id: true,
+          type: true,
+          internalKey: true,
+          lockedForManualEntry: true,
+          memberAccessRestricted: true,
+        },
+      });
+      if (!category) {
+        return res.status(400).json({ error: "Invalid investment category for schedule payload" });
+      }
+    }
+
+    try {
+      await assertCategoryManualMemberAccess(prisma, { accountId, userId, category });
+    } catch (e) {
+      if (e && e.statusCode === 403) {
+        return res.status(403).json({ error: "You do not have access to this category" });
+      }
+      if (e && e.statusCode === 400) {
+        if (e.message === "MANUAL_LOCKED" || e.message === "SYS_CATEGORY") {
+          return res.status(400).json({ error: "This category cannot be used for scheduled entries" });
+        }
+      }
+      throw e;
     }
 
     let nextRunAt;

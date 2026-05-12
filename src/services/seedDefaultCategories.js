@@ -2,7 +2,7 @@
  * Default categories for every new account (signup personal account or POST /accounts).
  * @param {import('@prisma/client').Prisma.TransactionClient} tx
  * @param {string} accountId
- * @param {{ investingEnabled?: boolean }} [options]
+ * @param {{ investingEnabled?: boolean; createdByUserId?: string | null }} [options]
  */
 const { ensureInvestmentCategories } = require("./investingCategories");
 
@@ -28,22 +28,35 @@ const CORE_DEFAULT_NAMES = CORE_SEED_ROWS.map((r) => r.name);
 
 async function seedDefaultCategories(tx, accountId, options = {}) {
   const investingEnabled = options.investingEnabled !== false;
+  const createdByUserId = options.createdByUserId ?? null;
+  const base = { accountId, ...(createdByUserId ? { createdByUserId } : {}) };
 
   let expenseOrder = 0;
   let incomeOrder = 0;
-  await tx.category.createMany({
-    data: CORE_SEED_ROWS.map((row) => ({
-      accountId,
-      type: row.type,
-      name: row.name,
-      icon: row.icon,
-      sortOrder: row.type === "EXPENSE" ? expenseOrder++ : incomeOrder++,
-    })),
-    skipDuplicates: true,
-  });
+  for (const row of CORE_SEED_ROWS) {
+    const sortOrder = row.type === "EXPENSE" ? expenseOrder++ : incomeOrder++;
+    await tx.category.upsert({
+      where: {
+        accountId_type_name: { accountId, type: row.type, name: row.name },
+      },
+      create: {
+        ...base,
+        type: row.type,
+        name: row.name,
+        icon: row.icon,
+        sortOrder,
+      },
+      update: {
+        deletedAt: null,
+        icon: row.icon,
+        sortOrder,
+        ...(createdByUserId ? { createdByUserId } : {}),
+      },
+    });
+  }
 
   if (investingEnabled) {
-    await ensureInvestmentCategories(tx, accountId);
+    await ensureInvestmentCategories(tx, accountId, { createdByUserId });
   }
 }
 

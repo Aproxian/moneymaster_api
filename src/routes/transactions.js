@@ -5,6 +5,7 @@ const { prisma } = require("../prisma");
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
+const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 
 /**
  * @param {string} accountId
@@ -507,17 +508,38 @@ transactionsRouter.post("/", async (req, res, next) => {
         accountId,
         deletedAt: null,
       },
-      select: { id: true, type: true, internalKey: true, lockedForManualEntry: true },
+      select: {
+        id: true,
+        type: true,
+        internalKey: true,
+        lockedForManualEntry: true,
+        memberAccessRestricted: true,
+      },
     });
 
     if (!category) {
       return res.status(400).json({ error: "Invalid categoryId for account" });
     }
 
-    if (category.lockedForManualEntry || category.internalKey) {
-      return res.status(400).json({
-        error: "This category is locked and cannot be selected for manual entries",
-      });
+    try {
+      await assertCategoryManualMemberAccess(prisma, { accountId, userId, category });
+    } catch (e) {
+      if (e && e.statusCode === 403) {
+        return res.status(403).json({ error: "You do not have access to this category" });
+      }
+      if (e && e.statusCode === 400) {
+        if (e.message === "MANUAL_LOCKED") {
+          return res.status(400).json({
+            error: "This category is locked and cannot be selected for manual entries",
+          });
+        }
+        if (e.message === "SYS_CATEGORY") {
+          return res.status(400).json({
+            error: "This category is locked and cannot be selected for manual entries",
+          });
+        }
+      }
+      throw e;
     }
 
     if (category.type !== body.type) {

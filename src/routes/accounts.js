@@ -14,6 +14,11 @@ const { seedDefaultWallets } = require("../services/seedDefaultWallets");
 const {
   throwIfCannotEnablePreventNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
+const {
+  getPrimaryOwnerUserId,
+  syncNewMemberCategoryAccess,
+  sortMembersForLockUi,
+} = require("../services/categoryMemberAccess");
 
 const accountsRouter = Router();
 
@@ -215,7 +220,7 @@ accountsRouter.post("/", async (req, res, next) => {
           createdAt: true,
         },
       });
-      await seedDefaultCategories(tx, created.id, { investingEnabled });
+      await seedDefaultCategories(tx, created.id, { investingEnabled, createdByUserId: userId });
       return created;
     });
 
@@ -245,7 +250,7 @@ accountsRouter.get(
       });
 
       res.set("Cache-Control", "no-store, private");
-      return res.json({ members });
+      return res.json({ members: sortMembersForLockUi(members) });
     } catch (err) {
       next(err);
     }
@@ -312,6 +317,8 @@ accountsRouter.post(
           meta: { addedUserId: body.userId },
         },
       });
+
+      await syncNewMemberCategoryAccess(prisma, accountId, body.userId);
 
       return res.status(201).json({ member: created });
     } catch (err) {
@@ -541,7 +548,8 @@ accountsRouter.patch(
           await removeInvestmentCategories(tx, accountId);
         }
         if (body.investingEnabled === true && !existing.investingEnabled) {
-          await ensureInvestmentCategories(tx, accountId);
+          const ownerId = await getPrimaryOwnerUserId(tx, accountId);
+          await ensureInvestmentCategories(tx, accountId, { createdByUserId: ownerId });
         }
 
         if (body.walletsEnabled === false && existing.walletsEnabled) {
