@@ -507,16 +507,16 @@ transactionsRouter.post("/", async (req, res, next) => {
         accountId,
         deletedAt: null,
       },
-      select: { id: true, type: true, internalKey: true },
+      select: { id: true, type: true, internalKey: true, lockedForManualEntry: true },
     });
 
     if (!category) {
       return res.status(400).json({ error: "Invalid categoryId for account" });
     }
 
-    if (category.internalKey) {
+    if (category.lockedForManualEntry || category.internalKey) {
       return res.status(400).json({
-        error: "This category cannot be selected for manual entries",
+        error: "This category is locked and cannot be selected for manual entries",
       });
     }
 

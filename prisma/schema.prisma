@@ -241,6 +241,8 @@ model Category {
   sortOrder Int       @default(0)
   /// System use: e.g. INV_STOCKS, CASH_OUT_INVESTMENT. Omitted for user-created categories.
   internalKey String? @db.VarChar(64)
+  /// When true, cannot be chosen for manual income/expense/investment entries (UI + API). Transfer legs use this; users may toggle for custom categories later.
+  lockedForManualEntry Boolean @default(false)
   icon      String?
   color     String?
   createdAt DateTime  @default(now())

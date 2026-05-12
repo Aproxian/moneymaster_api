@@ -3,7 +3,6 @@ const { z } = require("zod");
 
 const { prisma } = require("../prisma");
 const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
-const { TRANSFER_RECEIVE, TRANSFER_SEND } = require("../lib/transferCategoryKeys");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { seedDefaultCategories } = require("../services/seedDefaultCategories");
@@ -22,6 +21,7 @@ const updateCategorySchema = z.object({
   name: z.string().min(1).max(120).optional(),
   icon: z.string().min(1).max(10).optional(),
   color: z.string().max(20).optional().nullable(),
+  lockedForManualEntry: z.boolean().optional(),
 });
 
 const reorderCategoriesSchema = z.object({
@@ -32,26 +32,14 @@ const reorderCategoriesSchema = z.object({
 categoriesRouter.use(requireAuth);
 categoriesRouter.use(requireAccountMember("accountId"));
 
-/** System-only categories hidden from pickers, reorder, and GET /categories. */
-const HIDDEN_CATEGORY_INTERNAL_KEYS = [CASH_OUT_INVESTMENT, TRANSFER_SEND, TRANSFER_RECEIVE];
-
-/**
- * Categories shown on the Categories screen (excludes transfer legs, cash-out, etc.).
- * Must allow `internalKey: null` (user categories): SQL `NOT (col IN (...))` drops NULL rows.
- */
+/** System-only rows hidden from the Categories screen (cash-out is ledger-only, not user-editable). */
 function visibleCategoriesWhere(accountId) {
   return {
     accountId,
     deletedAt: null,
-    OR: [
-      { internalKey: null },
-      {
-        AND: [
-          { internalKey: { not: null } },
-          { NOT: { internalKey: { in: HIDDEN_CATEGORY_INTERNAL_KEYS } } },
-        ],
-      },
-    ],
+    NOT: {
+      AND: [{ internalKey: { not: null } }, { internalKey: CASH_OUT_INVESTMENT }],
+    },
   };
 }
 
@@ -65,6 +53,7 @@ async function listVisibleCategories(accountId) {
       icon: true,
       color: true,
       internalKey: true,
+      lockedForManualEntry: true,
       sortOrder: true,
       createdAt: true,
       updatedAt: true,
@@ -384,6 +373,8 @@ categoriesRouter.post("/", async (req, res, next) => {
         icon: true,
         color: true,
         sortOrder: true,
+        internalKey: true,
+        lockedForManualEntry: true,
         createdAt: true,
       },
     });
@@ -410,6 +401,7 @@ categoriesRouter.patch("/:categoryId", async (req, res, next) => {
         id: true,
         type: true,
         name: true,
+        internalKey: true,
       },
     });
 
@@ -435,6 +427,12 @@ categoriesRouter.patch("/:categoryId", async (req, res, next) => {
       }
     }
 
+    if (body.lockedForManualEntry !== undefined && existing.internalKey != null) {
+      return res.status(400).json({
+        error: "System categories cannot change manual-entry lock",
+      });
+    }
+
     const updated = await prisma.category.update({
       where: { id: categoryId },
       data: {
@@ -446,6 +444,8 @@ categoriesRouter.patch("/:categoryId", async (req, res, next) => {
             : body.color === null
             ? null
             : body.color,
+        lockedForManualEntry:
+          body.lockedForManualEntry === undefined ? undefined : body.lockedForManualEntry,
       },
       select: {
         id: true,
@@ -453,6 +453,8 @@ categoriesRouter.patch("/:categoryId", async (req, res, next) => {
         name: true,
         icon: true,
         color: true,
+        internalKey: true,
+        lockedForManualEntry: true,
         sortOrder: true,
         createdAt: true,
         updatedAt: true,

@@ -1,7 +1,7 @@
 const { TRANSFER_RECEIVE, TRANSFER_SEND } = require("../lib/transferCategoryKeys");
 
 /**
- * Lazily creates hidden transfer categories on an account (manual pick is blocked by internalKey).
+ * Lazily creates transfer categories on an account (manual entry blocked via `lockedForManualEntry`).
  * @param {import('@prisma/client').Prisma.TransactionClient} tx
  * @param {string} accountId
  */
@@ -18,6 +18,7 @@ async function ensureTransferCategories(tx, accountId) {
         name: "Transfer (send)",
         icon: "↗️",
         internalKey: TRANSFER_SEND,
+        lockedForManualEntry: true,
       },
       select: { id: true },
     });
@@ -35,10 +36,20 @@ async function ensureTransferCategories(tx, accountId) {
         name: "Transfer (receive)",
         icon: "↙️",
         internalKey: TRANSFER_RECEIVE,
+        lockedForManualEntry: true,
       },
       select: { id: true },
     });
   }
+
+  await tx.category.updateMany({
+    where: {
+      accountId,
+      deletedAt: null,
+      internalKey: { in: [TRANSFER_SEND, TRANSFER_RECEIVE] },
+    },
+    data: { lockedForManualEntry: true },
+  });
 
   return { sendCategoryId: send.id, receiveCategoryId: recv.id };
 }

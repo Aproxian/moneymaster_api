@@ -67,12 +67,19 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
       },
       select: {
         id: true,
+        lockedForManualEntry: true,
       },
     });
 
     if (!category) {
       return res.status(400).json({
         error: "Invalid categoryId (must be an INVESTMENT category for account)",
+      });
+    }
+
+    if (category.lockedForManualEntry) {
+      return res.status(400).json({
+        error: "This category is locked and cannot be used for manual investments",
       });
     }
 

@@ -42,9 +42,9 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
     const type = tab === "income" ? "INCOME" : "EXPENSE";
     const category = await tx.category.findFirst({
       where: { id: categoryId, accountId, deletedAt: null },
-      select: { id: true, type: true, internalKey: true },
+      select: { id: true, type: true, internalKey: true, lockedForManualEntry: true },
     });
-    if (!category || category.internalKey) throw new Error("BAD_CATEGORY");
+    if (!category || category.lockedForManualEntry || category.internalKey) throw new Error("BAD_CATEGORY");
     if (category.type !== type) throw new Error("CATEGORY_TYPE_MISMATCH");
 
     if (type === "EXPENSE") {
@@ -98,9 +98,10 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
 
     const category = await tx.category.findFirst({
       where: { id: categoryId, accountId, type: "INVESTMENT", deletedAt: null },
-      select: { id: true },
+      select: { id: true, lockedForManualEntry: true },
     });
     if (!category) throw new Error("BAD_INV_CATEGORY");
+    if (category.lockedForManualEntry) throw new Error("BAD_INV_CATEGORY");
 
     const txRow = await tx.transaction.create({
       data: {
