@@ -1,10 +1,13 @@
 "use strict";
 
 const { prisma } = require("../prisma");
+const { calendarDateInSweepTimezone } = require("../lib/investmentsRefreshCron");
 const {
   refreshDailyQuotesForTwelveDataChunked,
   getTwelveDataCreditsPerTick,
 } = require("./marketData");
+
+const TWELVEDATA_STATE_ID = "TWELVEDATA";
 
 const SWEEP_INTERVAL_MS = Math.max(
   5_000,
@@ -16,6 +19,8 @@ let intervalId = null;
 let sweepBusy = false;
 /** @type {string | null} */
 let startedByUserId = null;
+/** @type {string | null} */
+let sweepAuditUserId = null;
 /** @type {Date | null} */
 let startedAt = null;
 let quotesCreatedThisSweep = 0;
@@ -40,20 +45,18 @@ function stopTwelveDataBackgroundSweep() {
   }
   sweepBusy = false;
   startedByUserId = null;
+  sweepAuditUserId = null;
   startedAt = null;
   quotesCreatedThisSweep = 0;
   pendingFirstReset = false;
 }
 
 /**
- * @param {{ userId: string, resetCycle?: boolean }} options
+ * @param {{ userId: string | null, resetCycle?: boolean }} options
  * @returns {Promise<{ ok: boolean, error?: string, intervalMs?: number, estimatedDurationMs?: number, ticksPerFullCycle?: number }>}
  */
 async function startTwelveDataBackgroundSweep(options) {
-  const userId = options.userId;
-  if (!userId) {
-    return { ok: false, error: "userId_required" };
-  }
+  const userId = options.userId ?? null;
   if (intervalId != null) {
     return { ok: false, error: "already_running", ...getTwelveDataBackgroundSweepStatus() };
   }
@@ -66,6 +69,7 @@ async function startTwelveDataBackgroundSweep(options) {
   const estimatedDurationMs = ticksPerFullCycle * SWEEP_INTERVAL_MS;
 
   startedByUserId = userId;
+  sweepAuditUserId = userId;
   startedAt = new Date();
   quotesCreatedThisSweep = 0;
   pendingFirstReset = Boolean(options.resetCycle);
@@ -93,11 +97,22 @@ async function startTwelveDataBackgroundSweep(options) {
       if (result.cycleJustCompleted) {
         const quotesCreatedTotal = quotesCreatedThisSweep;
         const instrumentsCount = result.instrumentsCount;
+        const auditUid = sweepAuditUserId;
         stopTwelveDataBackgroundSweep();
+        try {
+          const day = calendarDateInSweepTimezone();
+          await prisma.twelveDataQuoteRefreshState.updateMany({
+            where: { id: TWELVEDATA_STATE_ID },
+            data: { lastBackgroundSweepCompletedDate: day },
+          });
+        } catch (persistErr) {
+          // eslint-disable-next-line no-console -- avoid silent failure
+          console.error("[TwelveDataSweep] lastBackgroundSweepCompletedDate update failed:", persistErr);
+        }
         try {
           await prisma.auditLog.create({
             data: {
-              userId,
+              userId: auditUid,
               action: "UPDATE",
               entity: "TwelveDataQuoteSweep",
               entityId: null,

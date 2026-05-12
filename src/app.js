@@ -17,6 +17,10 @@ const { accountInstrumentsRouter } = require("./routes/accountInstruments");
 
 const app = express();
 
+if (process.env.TRUST_PROXY === "1" || process.env.TRUST_PROXY === "true") {
+  app.set("trust proxy", 1);
+}
+
 app.use(helmet());
 app.use(cors({ origin: true, credentials: true }));
 // Explicit bytes: bulk CSV can exceed 100kb default (Express / body-parser).
