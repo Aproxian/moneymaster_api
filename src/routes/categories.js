@@ -3,6 +3,7 @@ const { z } = require("zod");
 
 const { prisma } = require("../prisma");
 const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
+const { TRANSFER_RECEIVE, TRANSFER_SEND } = require("../lib/transferCategoryKeys");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { seedDefaultCategories } = require("../services/seedDefaultCategories");
@@ -31,14 +32,26 @@ const reorderCategoriesSchema = z.object({
 categoriesRouter.use(requireAuth);
 categoriesRouter.use(requireAccountMember("accountId"));
 
-/** Categories shown on the Categories screen (excludes hidden system rows such as cash-out). */
+/** System-only categories hidden from pickers, reorder, and GET /categories. */
+const HIDDEN_CATEGORY_INTERNAL_KEYS = [CASH_OUT_INVESTMENT, TRANSFER_SEND, TRANSFER_RECEIVE];
+
+/**
+ * Categories shown on the Categories screen (excludes transfer legs, cash-out, etc.).
+ * Must allow `internalKey: null` (user categories): SQL `NOT (col IN (...))` drops NULL rows.
+ */
 function visibleCategoriesWhere(accountId) {
   return {
     accountId,
     deletedAt: null,
-    NOT: {
-      AND: [{ internalKey: { not: null } }, { internalKey: CASH_OUT_INVESTMENT }],
-    },
+    OR: [
+      { internalKey: null },
+      {
+        AND: [
+          { internalKey: { not: null } },
+          { NOT: { internalKey: { in: HIDDEN_CATEGORY_INTERNAL_KEYS } } },
+        ],
+      },
+    ],
   };
 }
 
