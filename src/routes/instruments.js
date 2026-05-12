@@ -3,10 +3,17 @@ const { z } = require("zod");
 
 const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
+const {
+  postSingleInstrument,
+  postBulkInstruments,
+} = require("../services/instrumentAdminImport");
 
 const instrumentsRouter = Router();
 
 instrumentsRouter.use(requireAuth);
+
+instrumentsRouter.post("/bulk", postBulkInstruments);
+instrumentsRouter.post("/create", postSingleInstrument);
 
 const listSchema = z.object({
   query: z.preprocess(
