@@ -372,27 +372,43 @@ accountsRouter.delete(
         select: { name: true },
       });
 
-      await prisma.accountMember.delete({
-        where: { userId_accountId: { userId: memberUserId, accountId } },
-      });
+      const now = new Date();
+      await prisma.$transaction(async (tx) => {
+        await tx.accountMember.delete({
+          where: { userId_accountId: { userId: memberUserId, accountId } },
+        });
 
-      await prisma.membershipNotice.create({
-        data: {
-          userId: memberUserId,
-          kind: "REMOVED",
-          accountId,
-          accountName: accountBrief?.name ?? null,
-        },
-      });
+        const cancelledSchedules = await tx.pendingTransactionSchedule.updateMany({
+          where: {
+            accountId,
+            createdByUserId: memberUserId,
+            status: "PENDING",
+            cancelledAt: null,
+          },
+          data: { status: "CANCELLED", cancelledAt: now },
+        });
 
-      await prisma.auditLog.create({
-        data: {
-          userId: requesterId,
-          action: "MEMBER_REMOVE",
-          entity: "Account",
-          entityId: accountId,
-          meta: { removedUserId: memberUserId },
-        },
+        await tx.membershipNotice.create({
+          data: {
+            userId: memberUserId,
+            kind: "REMOVED",
+            accountId,
+            accountName: accountBrief?.name ?? null,
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            userId: requesterId,
+            action: "MEMBER_REMOVE",
+            entity: "Account",
+            entityId: accountId,
+            meta: {
+              removedUserId: memberUserId,
+              cancelledPendingSchedules: cancelledSchedules.count,
+            },
+          },
+        });
       });
 
       return res.status(204).send();

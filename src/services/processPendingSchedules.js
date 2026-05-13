@@ -4,6 +4,42 @@ const { materializeScheduledPayload } = require("./materializeScheduledPayload")
 
 const MAX_BURST = 500;
 
+async function cancelScheduleIfCreatorNoLongerMember(tx, schedule, now) {
+  const creatorMember = await tx.accountMember.findUnique({
+    where: {
+      userId_accountId: {
+        userId: schedule.createdByUserId,
+        accountId: schedule.accountId,
+      },
+    },
+    select: { userId: true },
+  });
+
+  if (creatorMember) return false;
+
+  await tx.pendingTransactionSchedule.update({
+    where: { id: schedule.id },
+    data: { status: "CANCELLED", cancelledAt: now },
+  });
+
+  await tx.auditLog.create({
+    data: {
+      userId: null,
+      action: "DELETE",
+      entity: "PendingTransactionSchedule",
+      entityId: schedule.id,
+      meta: {
+        accountId: schedule.accountId,
+        cancel: true,
+        reason: "SCHEDULE_CREATOR_REMOVED",
+        createdByUserId: schedule.createdByUserId,
+      },
+    },
+  });
+
+  return true;
+}
+
 /**
  * Materializes due delayed / recurring transaction templates for every account this user can access.
  * Intended to run after login / refresh / explicit client ping (no cron).
@@ -35,6 +71,8 @@ async function processPendingSchedulesForUser(userId) {
           where: { id: sch.id, status: "PENDING", cancelledAt: null },
         });
         if (!fresh) return;
+
+        if (await cancelScheduleIfCreatorNoLongerMember(tx, fresh, now)) return;
 
         if (fresh.kind === "DELAY_ONCE") {
           const at = fresh.nextRunAt ?? fresh.executeAt;
@@ -89,4 +127,4 @@ async function processPendingSchedulesForUser(userId) {
   }
 }
 
-module.exports = { processPendingSchedulesForUser };
+module.exports = { processPendingSchedulesForUser, cancelScheduleIfCreatorNoLongerMember };
