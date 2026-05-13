@@ -1,9 +1,20 @@
 const assert = require("node:assert/strict");
+const Module = require("node:module");
 const test = require("node:test");
+
+const originalLoad = Module._load;
+Module._load = function loadWithPrismaStub(request, parent, isMain) {
+  if (request === "../prisma" && parent?.filename?.endsWith("processPendingSchedules.js")) {
+    return { prisma: {} };
+  }
+  return originalLoad.call(this, request, parent, isMain);
+};
 
 const {
   cancelScheduleIfCreatorNoLongerMember,
 } = require("../src/services/processPendingSchedules");
+
+Module._load = originalLoad;
 
 function makeTx({ creatorIsMember }) {
   const calls = {
