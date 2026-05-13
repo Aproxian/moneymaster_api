@@ -20,6 +20,22 @@ const PSEUDO_EXCHANGES = new Set([
   "AGRICULTURE",
 ]);
 
+/**
+ * Twelve Data batch `time_series` often resolves US listings more reliably with ISO MIC
+ * than with `exchange=NASDAQ` / `exchange=NYSE` alongside comma-separated tickers.
+ */
+const US_EXCHANGE_NAME_TO_MIC = new Map(
+  Object.entries({
+    NASDAQ: "XNAS",
+    NYSE: "XNYS",
+    AMEX: "XASE",
+    ARCA: "ARCX",
+    "NYSE ARCA": "ARCX",
+    "NYSE MKT": "XASE",
+    BATS: "BATS",
+  }).map(([k, v]) => [k.toUpperCase().replace(/\s+/g, " "), v])
+);
+
 /** Twelve Data allows comma-separated symbols; API caps matches per response (typically 120). */
 const BATCH_SIZE = parseInt(process.env.TWELVEDATA_QUOTE_BATCH_SIZE || "120", 10);
 /**
@@ -43,6 +59,11 @@ const TWELVEDATA_STATE_ID = "TWELVEDATA";
 const SINGLE_FALLBACK =
   String(process.env.TWELVEDATA_SINGLE_FALLBACK || "").toLowerCase() === "1" ||
   String(process.env.TWELVEDATA_SINGLE_FALLBACK || "").toLowerCase() === "true";
+
+/** If true, after a failed batch (e.g. global symbol error), retry once using `SYM:EXCHANGE` comma list with no venue query params (doubles credits for that slice). Set `TWELVEDATA_BATCH_COLON_RETRY=1` to enable. */
+const BATCH_COLON_RETRY =
+  String(process.env.TWELVEDATA_BATCH_COLON_RETRY || "").toLowerCase() === "1" ||
+  String(process.env.TWELVEDATA_BATCH_COLON_RETRY || "").toLowerCase() === "true";
 
 /** Thrown when Twelve Data returns JSON `{ status: "error", code, message }` (often HTTP 200). */
 class TwelveDataApiError extends Error {
@@ -80,6 +101,15 @@ function throwIfTwelveDataGlobalError(data) {
   );
 }
 
+/** Strip accidental `TICKER@MIC` / `TICKER@NYSE` stored in `providerSymbol`. */
+function sanitizeTwelveDataSymbol(sym) {
+  let s = String(sym || "").trim();
+  const at = s.indexOf("@");
+  if (at > 0) s = s.slice(0, at);
+  s = s.replace(/\s+/g, "");
+  return s;
+}
+
 /**
  * @param {string} exchangeRaw
  * @returns {{ exchange?: string, mic_code?: string }}
@@ -93,6 +123,8 @@ function venueQueryParams(exchangeRaw) {
   if (/^X[A-Z0-9]{3}$/.test(ex)) {
     return { mic_code: ex };
   }
+  const usMic = US_EXCHANGE_NAME_TO_MIC.get(up);
+  if (usMic) return { mic_code: usMic };
   return { exchange: ex };
 }
 
@@ -123,31 +155,11 @@ function parseTimeSeriesPayload(data, now) {
 }
 
 /**
- * Batch time_series: symbols share the same venue params (or none).
- * @param {string[]} symbols upper or mixed case tickers
- * @param {{ exchange?: string, mic_code?: string }} venue
+ * @param {unknown} data
+ * @param {string[]} symbolsForKeys uppercased tickers used to fill the result map
  */
-async function fetchTwelveDataTimeSeriesBatch(symbols, venue) {
-  if (!process.env.TWELVEDATA_API_KEY) {
-    throw new Error("TWELVEDATA_API_KEY is not set");
-  }
-  if (!symbols.length) return new Map();
-
-  const url = new URL(`${TWELVEDATA_BASE_URL}/time_series`);
-  url.searchParams.set("symbol", symbols.join(","));
-  url.searchParams.set("interval", "1day");
-  url.searchParams.set("outputsize", "1");
-  url.searchParams.set("apikey", process.env.TWELVEDATA_API_KEY);
-  if (venue.exchange) url.searchParams.set("exchange", venue.exchange);
-  if (venue.mic_code) url.searchParams.set("mic_code", venue.mic_code);
-
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    throw new Error(`Twelve Data batch failed ${res.status}: ${await res.text()}`);
-  }
-
-  const data = await res.json();
-  throwIfTwelveDataGlobalError(data);
+function parseTimeSeriesBatchResponse(data, symbolsForKeys) {
+  if (!data || typeof data !== "object") return new Map();
   const now = new Date();
   const bySym = new Map();
 
@@ -165,12 +177,17 @@ async function fetchTwelveDataTimeSeriesBatch(symbols, venue) {
       if (!entry || typeof entry !== "object") continue;
       if (entry.status === "error") continue;
       const parsed = parseTimeSeriesPayload(entry, now);
-      if (parsed) bySym.set(String(rawKey).toUpperCase(), parsed);
+      if (parsed) {
+        const keyUp = String(rawKey).toUpperCase();
+        const base = keyUp.includes(":") ? keyUp.split(":")[0] : keyUp;
+        bySym.set(keyUp, parsed);
+        if (base !== keyUp) bySym.set(base, parsed);
+      }
     }
     if (bySym.size > 0) return bySym;
   }
 
-  for (const sym of symbols) {
+  for (const sym of symbolsForKeys) {
     const entry =
       data[sym] ||
       data[sym.toUpperCase()] ||
@@ -182,18 +199,66 @@ async function fetchTwelveDataTimeSeriesBatch(symbols, venue) {
     }
   }
 
-  if (bySym.size === 0 && parseTimeSeriesPayload(data, now)) {
+  if (bySym.size === 0 && parseTimeSeriesPayload(data, now) && symbolsForKeys.length) {
     const one = parseTimeSeriesPayload(data, now);
-    bySym.set(symbols[0].toUpperCase(), one);
+    bySym.set(symbolsForKeys[0].toUpperCase(), one);
   }
 
   return bySym;
+}
+
+/**
+ * Batch time_series: symbols share the same venue params (or none).
+ * @param {string[]} symbols upper or mixed case tickers
+ * @param {{ exchange?: string, mic_code?: string }} venue
+ * @param {{ exchangeRawForRetry?: string | null }} [options] Raw DB `exchange` for optional `SYM:EXCHANGE` retry
+ */
+async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
+  if (!process.env.TWELVEDATA_API_KEY) {
+    throw new Error("TWELVEDATA_API_KEY is not set");
+  }
+  const cleaned = symbols.map(sanitizeTwelveDataSymbol).filter(Boolean);
+  if (!cleaned.length) return new Map();
+
+  const keysUpper = cleaned.map((s) => s.toUpperCase());
+
+  async function doFetch(symbolParam, v) {
+    const url = new URL(`${TWELVEDATA_BASE_URL}/time_series`);
+    url.searchParams.set("symbol", symbolParam);
+    url.searchParams.set("interval", "1day");
+    url.searchParams.set("outputsize", "1");
+    url.searchParams.set("apikey", process.env.TWELVEDATA_API_KEY);
+    if (v.exchange) url.searchParams.set("exchange", v.exchange);
+    if (v.mic_code) url.searchParams.set("mic_code", v.mic_code);
+
+    const res = await fetch(url.toString());
+    if (!res.ok) {
+      throw new Error(`Twelve Data batch failed ${res.status}: ${await res.text()}`);
+    }
+
+    const data = await res.json();
+    throwIfTwelveDataGlobalError(data);
+    return parseTimeSeriesBatchResponse(data, keysUpper);
+  }
+
+  try {
+    return await doFetch(cleaned.join(","), venue);
+  } catch (e) {
+    if (!(e instanceof TwelveDataApiError) || !BATCH_COLON_RETRY) throw e;
+    const raw = String(options.exchangeRawForRetry || "").trim();
+    if (!raw || PSEUDO_EXCHANGES.has(raw.toUpperCase())) throw e;
+    const up = raw.toUpperCase();
+    const colonParam = cleaned.map((s) => `${s.toUpperCase()}:${up}`).join(",");
+    return await doFetch(colonParam, {});
+  }
 }
 
 async function fetchTwelveDataTimeSeriesSingle(symbol, venue) {
   if (!process.env.TWELVEDATA_API_KEY) {
     throw new Error("TWELVEDATA_API_KEY is not set");
   }
+
+  symbol = sanitizeTwelveDataSymbol(symbol);
 
   const url = new URL(`${TWELVEDATA_BASE_URL}/time_series`);
   url.searchParams.set("symbol", symbol);
@@ -263,14 +328,16 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
       const symbols = chunk.map((x) => x.providerSymbol);
       let bySym = new Map();
       try {
-        bySym = await fetchTwelveDataTimeSeriesBatch(symbols, venue);
+        bySym = await fetchTwelveDataTimeSeriesBatch(symbols, venue, {
+          exchangeRawForRetry: list[0].exchange,
+        });
       } catch (e) {
         if (e instanceof TwelveDataApiError) throw e;
         bySym = new Map();
       }
 
       for (const inst of chunk) {
-        const su = inst.providerSymbol.toUpperCase();
+        const su = sanitizeTwelveDataSymbol(inst.providerSymbol).toUpperCase();
         const hit = bySym.get(su) || bySym.get(inst.providerSymbol);
         if (hit) result[inst.id] = hit;
       }
@@ -297,7 +364,8 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
 
 function instrumentDisplayLabel(i) {
   const ex = String(i.exchange || "").trim();
-  return ex ? `${i.providerSymbol}@${ex}` : i.providerSymbol;
+  const sym = sanitizeTwelveDataSymbol(i.providerSymbol);
+  return ex ? `${sym}@${ex}` : sym;
 }
 
 async function loadTwelveDataInstrumentsOrdered() {
