@@ -74,6 +74,7 @@ enum RecurrenceUnit {
 enum MembershipNoticeKind {
   REMOVED
   ACCOUNT_DELETED
+  ADDED
 }
 
 model User {
@@ -461,6 +462,14 @@ model TwelveDataQuoteRefreshState {
   totalSnapshot Int      @default(0)
   /// YYYY-MM-DD in Europe/Sofia (or INVESTMENTS_SWEEP_DAY_TIMEZONE) when a background sweep last finished a full cycle.
   lastBackgroundSweepCompletedDate String? @db.VarChar(10)
+  /// When set and `backgroundSweepLastTickAt` is fresh, a sweep is considered active (possibly on another Node instance).
+  backgroundSweepSessionStartedAt  DateTime?
+  /// Heartbeat written after each tick on the instance that runs `setInterval`.
+  backgroundSweepLastTickAt        DateTime?
+  backgroundSweepStartedByUserId   String?
+  backgroundSweepInstrumentsSnapshot Int?
+  /// Other workers set this; the runner clears it on the next tick and stops locally.
+  backgroundSweepCancelRequested   Boolean  @default(false)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }

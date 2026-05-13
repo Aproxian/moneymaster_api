@@ -293,6 +293,11 @@ accountsRouter.post(
       });
       if (existing) return res.status(409).json({ error: "User is already a member" });
 
+      const accountBrief = await prisma.account.findFirst({
+        where: { id: accountId, deletedAt: null },
+        select: { name: true },
+      });
+
       const created = await prisma.accountMember.create({
         data: {
           userId: body.userId,
@@ -305,6 +310,15 @@ accountsRouter.post(
           user: {
             select: { id: true, email: true, displayName: true },
           },
+        },
+      });
+
+      await prisma.membershipNotice.create({
+        data: {
+          userId: body.userId,
+          kind: "ADDED",
+          accountId,
+          accountName: accountBrief?.name ?? null,
         },
       });
 

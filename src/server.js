@@ -6,8 +6,8 @@ const server = app.listen(config.port, () => {
   console.log(`API listening on http://localhost:${config.port}`);
 });
 
-function shutdown() {
-  stopTwelveDataBackgroundSweep();
+async function shutdown() {
+  await stopTwelveDataBackgroundSweep();
   server.close(() => process.exit(0));
 }
 

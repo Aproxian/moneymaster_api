@@ -15,6 +15,8 @@ const {
   stopTwelveDataBackgroundSweep,
   getTwelveDataBackgroundSweepStatus,
   getTwelveDataSweepLiveStatus,
+  isLocalSweepRunnerActive,
+  requestRemoteBackgroundSweepCancel,
 } = require("../services/twelveDataRefreshScheduler");
 
 const investmentsRouter = Router();
@@ -100,7 +102,11 @@ investmentsRouter.post("/refresh-daily", refreshDailyAuth, async (req, res, next
     const auditCron = Boolean(req.refreshDailyCron);
 
     if (cancelBackgroundSweep) {
-      stopTwelveDataBackgroundSweep();
+      if (isLocalSweepRunnerActive()) {
+        await stopTwelveDataBackgroundSweep();
+      } else {
+        await requestRemoteBackgroundSweepCancel();
+      }
       await prisma.auditLog.create({
         data: {
           userId: auditUserId,

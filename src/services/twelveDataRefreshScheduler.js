@@ -14,6 +14,11 @@ const SWEEP_INTERVAL_MS = Math.max(
   parseInt(process.env.TWELVEDATA_SWEEP_INTERVAL_MS || "60000", 10)
 );
 
+/** If `backgroundSweepLastTickAt` is older than this, the session is treated as stale (crashed worker). */
+function getSweepHeartbeatStaleMs() {
+  return Math.max(SWEEP_INTERVAL_MS * 4, 120_000);
+}
+
 /** @type {ReturnType<typeof setInterval> | null} */
 let intervalId = null;
 let sweepBusy = false;
@@ -30,12 +35,92 @@ let pendingFirstReset = false;
 /** Snapshot of total active instruments when the current sweep started (for progress hints). */
 let sweepTotalInstruments = 0;
 
-/** Last finished chunk result (success or Twelve Data error). Updated every tick. */
+/** Last finished chunk result (success or Twelve Data error). Updated every tick (this process only). */
 let lastCompletedTick = null;
 /** Last Twelve Data API error object from a tick, if any. */
 let lastTwelveDataError = null;
 /** Non–Twelve-Data exception message from the last tick, if any. */
 let lastTickException = null;
+
+function isLocalSweepRunnerActive() {
+  return intervalId != null;
+}
+
+function clearLocalSweepIntervalAndMemory() {
+  if (intervalId != null) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
+  sweepBusy = false;
+  startedByUserId = null;
+  sweepAuditUserId = null;
+  startedAt = null;
+  quotesCreatedThisSweep = 0;
+  pendingFirstReset = false;
+  sweepTotalInstruments = 0;
+}
+
+async function clearPersistedSweepSession() {
+  try {
+    await prisma.twelveDataQuoteRefreshState.updateMany({
+      where: { id: TWELVEDATA_STATE_ID },
+      data: {
+        backgroundSweepSessionStartedAt: null,
+        backgroundSweepLastTickAt: null,
+        backgroundSweepStartedByUserId: null,
+        backgroundSweepInstrumentsSnapshot: null,
+        backgroundSweepCancelRequested: false,
+      },
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console -- avoid silent failure
+    console.error("[TwelveDataSweep] clearPersistedSweepSession failed:", e);
+  }
+}
+
+async function touchSweepHeartbeat() {
+  try {
+    await prisma.twelveDataQuoteRefreshState.update({
+      where: { id: TWELVEDATA_STATE_ID },
+      data: { backgroundSweepLastTickAt: new Date() },
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console -- avoid silent failure
+    console.error("[TwelveDataSweep] heartbeat update failed:", e);
+  }
+}
+
+/**
+ * Stop the in-process timer and clear DB-backed sweep session flags (any Node instance).
+ */
+async function stopTwelveDataBackgroundSweep() {
+  clearLocalSweepIntervalAndMemory();
+  lastCompletedTick = null;
+  lastTwelveDataError = null;
+  lastTickException = null;
+  await clearPersistedSweepSession();
+}
+
+/**
+ * Called from cancel when this process does not hold `setInterval`. Signals the runner to stop on its next tick.
+ * If there is no fresh heartbeat, clears zombie session fields.
+ */
+async function requestRemoteBackgroundSweepCancel() {
+  const staleBefore = new Date(Date.now() - getSweepHeartbeatStaleMs());
+  const row = await prisma.twelveDataQuoteRefreshState.findUnique({
+    where: { id: TWELVEDATA_STATE_ID },
+    select: { backgroundSweepLastTickAt: true },
+  });
+  if (row?.backgroundSweepLastTickAt && row.backgroundSweepLastTickAt >= staleBefore) {
+    await prisma.twelveDataQuoteRefreshState.update({
+      where: { id: TWELVEDATA_STATE_ID },
+      data: { backgroundSweepCancelRequested: true },
+    });
+    return { remoteCancelSignaled: true };
+  }
+  await clearPersistedSweepSession();
+  return { remoteCancelSignaled: false, clearedStaleSession: true };
+}
 
 function getTwelveDataBackgroundSweepStatus() {
   return {
@@ -54,44 +139,105 @@ function getTwelveDataBackgroundSweepStatus() {
 
 /**
  * DB cursor + sweep telemetry for polling (GET) while a background sweep runs.
+ * Merges DB heartbeat so GET matches POST even when requests hit different Node workers.
  */
 async function getTwelveDataSweepLiveStatus() {
-  const state = await prisma.twelveDataQuoteRefreshState.findUnique({
+  const staleMs = getSweepHeartbeatStaleMs();
+  const staleBefore = new Date(Date.now() - staleMs);
+
+  const row = await prisma.twelveDataQuoteRefreshState.findUnique({
     where: { id: TWELVEDATA_STATE_ID },
     select: {
       nextOffset: true,
       totalSnapshot: true,
       lastBackgroundSweepCompletedDate: true,
+      backgroundSweepSessionStartedAt: true,
+      backgroundSweepLastTickAt: true,
+      backgroundSweepStartedByUserId: true,
+      backgroundSweepInstrumentsSnapshot: true,
+      backgroundSweepCancelRequested: true,
     },
   });
-  const total = state?.totalSnapshot ?? 0;
-  const next = state?.nextOffset ?? 0;
+
+  const total = row?.totalSnapshot ?? 0;
+  const next = row?.nextOffset ?? 0;
   const approxRemainingThisLap = total > 0 ? Math.max(0, total - next) : 0;
+
+  const dbHeartbeatFresh =
+    Boolean(row?.backgroundSweepLastTickAt) &&
+    row.backgroundSweepLastTickAt.getTime() >= staleBefore.getTime();
+
+  const localRunning = intervalId != null;
+  const running = localRunning || dbHeartbeatFresh;
+  const sweepRunnerOnThisProcess = localRunning;
+  const sweepRunnerLikelyElsewhere = running && !localRunning;
+
+  const startedAtIso = localRunning
+    ? startedAt
+      ? startedAt.toISOString()
+      : null
+    : row?.backgroundSweepSessionStartedAt?.toISOString() ?? null;
+
+  const mergedStartedByUserId = localRunning
+    ? startedByUserId
+    : row?.backgroundSweepStartedByUserId ?? null;
+
+  const mergedSweepTotalInstruments = localRunning
+    ? sweepTotalInstruments
+    : dbHeartbeatFresh
+      ? row?.backgroundSweepInstrumentsSnapshot ?? 0
+      : 0;
+
+  const mergedLastCompletedTick = localRunning ? lastCompletedTick : null;
+  const mergedLastTwelveDataError = localRunning ? lastTwelveDataError : null;
+  const mergedLastTickException = localRunning ? lastTickException : null;
+  const mergedSweepBusy = localRunning ? sweepBusy : false;
+
+  const partialLapInDb = total > 0 && next > 0 && next < total;
+
+  let hint;
+  if (running && sweepRunnerLikelyElsewhere) {
+    hint =
+      "A background sweep is running on another API process (or this one): heartbeat is fresh in the database. `lastCompletedTick` / errors below reflect only this process. Use sticky sessions or a single worker if you need all telemetry on one host.";
+  } else if (running) {
+    hint =
+      "Background sweep is running on this process: each interval tick calls Twelve Data and updates the DB cursor until this lap completes (or a Twelve Data error blocks advancing the offset).";
+  } else if (total === 0) {
+    hint = "No instruments in the TWELVEDATA snapshot; start a sweep after active instruments exist.";
+  } else if (partialLapInDb) {
+    hint =
+      "Background sweep is not running (heartbeat stale or stopped). The cursor is the last persisted offset. POST /investments/refresh-daily with { \"backgroundSweep\": true } to start (unless already_swept_today).";
+  } else {
+    hint =
+      "Background sweep is not running; the cursor will not advance automatically. Start POST /investments/refresh-daily with { \"backgroundSweep\": true } (unless already_swept_today), or run a synchronous refresh without backgroundSweep to advance one chunk per request.";
+  }
+
   return {
-    ...getTwelveDataBackgroundSweepStatus(),
-    cursor: state
+    running,
+    sweepRunnerOnThisProcess,
+    sweepRunnerLikelyElsewhere,
+    startedAt: startedAtIso,
+    startedByUserId: mergedStartedByUserId,
+    intervalMs: SWEEP_INTERVAL_MS,
+    creditsPerTick: getTwelveDataCreditsPerTick(),
+    sweepBusy: mergedSweepBusy,
+    sweepTotalInstruments: mergedSweepTotalInstruments,
+    lastCompletedTick: mergedLastCompletedTick,
+    lastTwelveDataError: mergedLastTwelveDataError,
+    lastTickException: mergedLastTickException,
+    cursor: row
       ? {
-          nextOffset: state.nextOffset,
-          totalSnapshot: state.totalSnapshot,
-          lastBackgroundSweepCompletedDate: state.lastBackgroundSweepCompletedDate,
+          nextOffset: row.nextOffset,
+          totalSnapshot: row.totalSnapshot,
+          lastBackgroundSweepCompletedDate: row.lastBackgroundSweepCompletedDate,
         }
       : null,
     approxInstrumentsRemainingThisLap: approxRemainingThisLap,
+    partialLapInDb,
+    sweepHeartbeatStaleAfterMs: staleMs,
+    backgroundSweepCancelPending: Boolean(row?.backgroundSweepCancelRequested),
+    hint,
   };
-}
-
-function stopTwelveDataBackgroundSweep() {
-  if (intervalId != null) {
-    clearInterval(intervalId);
-    intervalId = null;
-  }
-  sweepBusy = false;
-  startedByUserId = null;
-  sweepAuditUserId = null;
-  startedAt = null;
-  quotesCreatedThisSweep = 0;
-  pendingFirstReset = false;
-  sweepTotalInstruments = 0;
 }
 
 /**
@@ -111,6 +257,49 @@ async function startTwelveDataBackgroundSweep(options) {
   const ticksPerFullCycle = total === 0 ? 0 : Math.ceil(total / credits);
   const estimatedDurationMs = ticksPerFullCycle * SWEEP_INTERVAL_MS;
 
+  const staleBefore = new Date(Date.now() - getSweepHeartbeatStaleMs());
+  const existing = await prisma.twelveDataQuoteRefreshState.findUnique({
+    where: { id: TWELVEDATA_STATE_ID },
+    select: { backgroundSweepLastTickAt: true },
+  });
+  if (
+    existing?.backgroundSweepLastTickAt &&
+    existing.backgroundSweepLastTickAt.getTime() >= staleBefore.getTime()
+  ) {
+    return { ok: false, error: "already_running", ...getTwelveDataBackgroundSweepStatus() };
+  }
+
+  await prisma.twelveDataQuoteRefreshState.upsert({
+    where: { id: TWELVEDATA_STATE_ID },
+    create: {
+      id: TWELVEDATA_STATE_ID,
+      nextOffset: 0,
+      totalSnapshot: total,
+    },
+    update: {
+      totalSnapshot: total,
+    },
+  });
+
+  const now = new Date();
+  const claimed = await prisma.twelveDataQuoteRefreshState.updateMany({
+    where: {
+      id: TWELVEDATA_STATE_ID,
+      OR: [{ backgroundSweepLastTickAt: null }, { backgroundSweepLastTickAt: { lt: staleBefore } }],
+    },
+    data: {
+      backgroundSweepSessionStartedAt: now,
+      backgroundSweepLastTickAt: now,
+      backgroundSweepStartedByUserId: userId,
+      backgroundSweepInstrumentsSnapshot: total,
+      backgroundSweepCancelRequested: false,
+    },
+  });
+
+  if (claimed.count === 0) {
+    return { ok: false, error: "already_running", ...getTwelveDataBackgroundSweepStatus() };
+  }
+
   startedByUserId = userId;
   sweepAuditUserId = userId;
   startedAt = new Date();
@@ -122,6 +311,21 @@ async function startTwelveDataBackgroundSweep(options) {
   lastTickException = null;
 
   const runTick = async () => {
+    if (!intervalId) return;
+
+    const cancelRow = await prisma.twelveDataQuoteRefreshState.findUnique({
+      where: { id: TWELVEDATA_STATE_ID },
+      select: { backgroundSweepCancelRequested: true },
+    });
+    if (cancelRow?.backgroundSweepCancelRequested) {
+      await clearPersistedSweepSession();
+      clearLocalSweepIntervalAndMemory();
+      lastCompletedTick = null;
+      lastTwelveDataError = null;
+      lastTickException = null;
+      return;
+    }
+
     if (sweepBusy) {
       // eslint-disable-next-line no-console -- operational visibility
       console.warn("[TwelveDataSweep] previous tick still running; skipping this interval");
@@ -173,7 +377,7 @@ async function startTwelveDataBackgroundSweep(options) {
         const quotesCreatedTotal = quotesCreatedThisSweep;
         const instrumentsCount = result.instrumentsCount;
         const auditUid = sweepAuditUserId;
-        stopTwelveDataBackgroundSweep();
+        await stopTwelveDataBackgroundSweep();
         try {
           const day = calendarDateInSweepTimezone();
           await prisma.twelveDataQuoteRefreshState.updateMany({
@@ -220,10 +424,12 @@ async function startTwelveDataBackgroundSweep(options) {
       console.error("[TwelveDataSweep] tick failed:", e);
     } finally {
       sweepBusy = false;
+      if (intervalId != null) {
+        await touchSweepHeartbeat();
+      }
     }
   };
 
-  // Does not call any HTTP URL on this API — runs `runTick` in-process (Twelve Data is called inside marketData).
   intervalId = setInterval(() => {
     void runTick();
   }, SWEEP_INTERVAL_MS);
@@ -245,5 +451,7 @@ module.exports = {
   stopTwelveDataBackgroundSweep,
   getTwelveDataBackgroundSweepStatus,
   getTwelveDataSweepLiveStatus,
+  isLocalSweepRunnerActive,
+  requestRemoteBackgroundSweepCancel,
   SWEEP_INTERVAL_MS,
 };
