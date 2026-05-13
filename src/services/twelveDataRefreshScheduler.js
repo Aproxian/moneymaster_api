@@ -27,6 +27,16 @@ let quotesCreatedThisSweep = 0;
 /** First HTTP tick uses resetCycle from the start request; later ticks never reset. */
 let pendingFirstReset = false;
 
+/** Snapshot of total active instruments when the current sweep started (for progress hints). */
+let sweepTotalInstruments = 0;
+
+/** Last finished chunk result (success or Twelve Data error). Updated every tick. */
+let lastCompletedTick = null;
+/** Last Twelve Data API error object from a tick, if any. */
+let lastTwelveDataError = null;
+/** Non–Twelve-Data exception message from the last tick, if any. */
+let lastTickException = null;
+
 function getTwelveDataBackgroundSweepStatus() {
   return {
     running: intervalId != null,
@@ -35,6 +45,38 @@ function getTwelveDataBackgroundSweepStatus() {
     intervalMs: SWEEP_INTERVAL_MS,
     creditsPerTick: getTwelveDataCreditsPerTick(),
     sweepBusy,
+    sweepTotalInstruments,
+    lastCompletedTick,
+    lastTwelveDataError,
+    lastTickException,
+  };
+}
+
+/**
+ * DB cursor + sweep telemetry for polling (GET) while a background sweep runs.
+ */
+async function getTwelveDataSweepLiveStatus() {
+  const state = await prisma.twelveDataQuoteRefreshState.findUnique({
+    where: { id: TWELVEDATA_STATE_ID },
+    select: {
+      nextOffset: true,
+      totalSnapshot: true,
+      lastBackgroundSweepCompletedDate: true,
+    },
+  });
+  const total = state?.totalSnapshot ?? 0;
+  const next = state?.nextOffset ?? 0;
+  const approxRemainingThisLap = total > 0 ? Math.max(0, total - next) : 0;
+  return {
+    ...getTwelveDataBackgroundSweepStatus(),
+    cursor: state
+      ? {
+          nextOffset: state.nextOffset,
+          totalSnapshot: state.totalSnapshot,
+          lastBackgroundSweepCompletedDate: state.lastBackgroundSweepCompletedDate,
+        }
+      : null,
+    approxInstrumentsRemainingThisLap: approxRemainingThisLap,
   };
 }
 
@@ -49,6 +91,7 @@ function stopTwelveDataBackgroundSweep() {
   startedAt = null;
   quotesCreatedThisSweep = 0;
   pendingFirstReset = false;
+  sweepTotalInstruments = 0;
 }
 
 /**
@@ -73,6 +116,10 @@ async function startTwelveDataBackgroundSweep(options) {
   startedAt = new Date();
   quotesCreatedThisSweep = 0;
   pendingFirstReset = Boolean(options.resetCycle);
+  sweepTotalInstruments = total;
+  lastCompletedTick = null;
+  lastTwelveDataError = null;
+  lastTickException = null;
 
   const runTick = async () => {
     if (sweepBusy) {
@@ -87,6 +134,34 @@ async function startTwelveDataBackgroundSweep(options) {
 
       const result = await refreshDailyQuotesForTwelveDataChunked({ resetCycle });
       quotesCreatedThisSweep += result.quotesCreated || 0;
+
+      lastTwelveDataError = result.twelveDataError ?? null;
+      lastTickException = null;
+      lastCompletedTick = {
+        at: new Date().toISOString(),
+        offsetStart: result.offsetStart,
+        nextOffset: result.nextOffset,
+        sliceLen: result.processedThisTick,
+        quotesCreated: result.quotesCreated ?? 0,
+        missingCount: result.missingSymbols?.length ?? 0,
+        missingSample: (result.missingSymbols ?? []).slice(0, 10),
+        cycleJustCompleted: Boolean(result.cycleJustCompleted),
+        twelveDataError: result.twelveDataError ?? null,
+      };
+
+      // eslint-disable-next-line no-console -- operational visibility (tail logs / journal)
+      console.log(
+        "[TwelveDataSweep] tick",
+        JSON.stringify({
+          quotesCreated: result.quotesCreated ?? 0,
+          sliceLen: result.processedThisTick,
+          offsetStart: result.offsetStart,
+          nextOffset: result.nextOffset,
+          total: result.instrumentsCount,
+          cycleJustCompleted: Boolean(result.cycleJustCompleted),
+          error: result.twelveDataError ?? null,
+        })
+      );
 
       if (result.twelveDataError) {
         // eslint-disable-next-line no-console -- operational visibility
@@ -129,6 +204,18 @@ async function startTwelveDataBackgroundSweep(options) {
         }
       }
     } catch (e) {
+      lastTickException = e instanceof Error ? e.message : String(e);
+      lastCompletedTick = {
+        at: new Date().toISOString(),
+        offsetStart: null,
+        nextOffset: null,
+        sliceLen: null,
+        quotesCreated: 0,
+        missingCount: 0,
+        missingSample: [],
+        cycleJustCompleted: false,
+        twelveDataError: null,
+      };
       // eslint-disable-next-line no-console -- avoid silent failure
       console.error("[TwelveDataSweep] tick failed:", e);
     } finally {
@@ -136,6 +223,7 @@ async function startTwelveDataBackgroundSweep(options) {
     }
   };
 
+  // Does not call any HTTP URL on this API — runs `runTick` in-process (Twelve Data is called inside marketData).
   intervalId = setInterval(() => {
     void runTick();
   }, SWEEP_INTERVAL_MS);
@@ -156,5 +244,6 @@ module.exports = {
   startTwelveDataBackgroundSweep,
   stopTwelveDataBackgroundSweep,
   getTwelveDataBackgroundSweepStatus,
+  getTwelveDataSweepLiveStatus,
   SWEEP_INTERVAL_MS,
 };

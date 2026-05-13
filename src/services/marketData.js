@@ -22,7 +22,11 @@ const PSEUDO_EXCHANGES = new Set([
 
 /** Twelve Data allows comma-separated symbols; API caps matches per response (typically 120). */
 const BATCH_SIZE = parseInt(process.env.TWELVEDATA_QUOTE_BATCH_SIZE || "120", 10);
-/** Space HTTP calls so Basic-tier minutely limits (~8/min) are not exceeded. Lower on higher plans. */
+/**
+ * Pause between Twelve Data HTTP batch calls **within one refresh** (chunk slice or "all" mode).
+ * Chunked background sweeps pass `{ skipBatchGap: true }` so spacing is only `TWELVEDATA_SWEEP_INTERVAL_MS`
+ * between slices of `TWELVEDATA_CREDITS_PER_MINUTE` instruments — not this gap plus the sweep interval.
+ */
 const BATCH_GAP_MS = parseInt(process.env.TWELVEDATA_BATCH_GAP_MS || "8000", 10);
 /** Max instruments to pull quotes for in one `/refresh-daily` call when using chunk mode (match plan credits/min). */
 const CREDITS_PER_TICK = Math.max(
@@ -232,7 +236,13 @@ async function fetchQuoteForInstrument(instrument) {
   return null;
 }
 
-async function fetchTwelveDataPrices(instruments) {
+/**
+ * @param {{ id: string, providerSymbol: string, exchange?: string | null }[]} instruments
+ * @param {{ skipBatchGap?: boolean }} [options] When true, omit `BATCH_GAP_MS` sleeps between Twelve Data
+ *   HTTP calls (used by chunk refresh so `TWELVEDATA_SWEEP_INTERVAL_MS` is the only throttle between slices).
+ */
+async function fetchTwelveDataPrices(instruments, options = {}) {
+  const skipBatchGap = Boolean(options.skipBatchGap);
   if (!instruments.length) {
     return {};
   }
@@ -274,11 +284,11 @@ async function fetchTwelveDataPrices(instruments) {
           } catch (e) {
             if (e instanceof TwelveDataApiError) throw e;
           }
-          if (BATCH_GAP_MS > 0) await sleep(BATCH_GAP_MS);
+          if (!skipBatchGap && BATCH_GAP_MS > 0) await sleep(BATCH_GAP_MS);
         }
       }
 
-      if (BATCH_GAP_MS > 0) await sleep(BATCH_GAP_MS);
+      if (!skipBatchGap && BATCH_GAP_MS > 0) await sleep(BATCH_GAP_MS);
     }
   }
 
@@ -422,7 +432,7 @@ async function refreshDailyQuotesForTwelveDataChunked(options = {}) {
 
   let pricesByInstrumentId;
   try {
-    pricesByInstrumentId = await fetchTwelveDataPrices(slice);
+    pricesByInstrumentId = await fetchTwelveDataPrices(slice, { skipBatchGap: true });
   } catch (e) {
     if (e instanceof TwelveDataApiError) {
       return {

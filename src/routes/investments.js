@@ -14,6 +14,7 @@ const {
   startTwelveDataBackgroundSweep,
   stopTwelveDataBackgroundSweep,
   getTwelveDataBackgroundSweepStatus,
+  getTwelveDataSweepLiveStatus,
 } = require("../services/twelveDataRefreshScheduler");
 
 const investmentsRouter = Router();
@@ -51,6 +52,25 @@ function rejectCronNonSweepBody(req, res, backgroundSweep, cancelBackgroundSweep
   });
   return true;
 }
+
+/** Poll while a background sweep runs (same auth as POST /refresh-daily: JWT admin or cron header). */
+investmentsRouter.get("/twelve-data-sweep-status", refreshDailyAuth, async (req, res, next) => {
+  try {
+    const adminEmail = process.env.ADMIN_EMAIL?.trim();
+    if (!req.refreshDailyCron && adminEmail) {
+      const user = await assertAdmin(req, res);
+      if (!user) return;
+    }
+    const live = await getTwelveDataSweepLiveStatus();
+    return res.json({
+      provider: "TWELVEDATA",
+      ...live,
+      cronAuthHeaderName: CRON_SECRET_HEADER,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 investmentsRouter.post("/refresh-daily", refreshDailyAuth, async (req, res, next) => {
   try {
