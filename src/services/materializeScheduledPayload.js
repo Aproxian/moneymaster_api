@@ -24,11 +24,12 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
 
   const account = await tx.account.findFirst({
     where: { id: accountId, deletedAt: null },
-    select: { id: true, currency: true, investingEnabled: true, walletsEnabled: true },
+    select: { id: true, currency: true, investingEnabled: true, walletsEnabled: true, walletMigrationPending: true },
   });
   if (!account) throw new Error("NO_ACCOUNT");
 
-  if (account.walletsEnabled) {
+  const walletsLive = account.walletsEnabled || account.walletMigrationPending;
+  if (walletsLive) {
     if (!walletId) throw new Error("WALLET_REQUIRED");
     const w = await tx.accountWallet.findFirst({
       where: { id: walletId, accountId, deletedAt: null },

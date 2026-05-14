@@ -31,7 +31,7 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, currency: true, investingEnabled: true, walletsEnabled: true },
+      select: { id: true, currency: true, investingEnabled: true, walletsEnabled: true, walletMigrationPending: true },
     });
 
     if (!account) {
@@ -98,7 +98,8 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
     }
 
     let walletId = body.walletId ?? null;
-    if (account.walletsEnabled) {
+    const walletsLive = account.walletsEnabled || account.walletMigrationPending;
+    if (walletsLive) {
       if (!walletId) {
         return res.status(400).json({ error: "walletId is required when wallets are enabled" });
       }
