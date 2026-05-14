@@ -5,6 +5,7 @@ const { prisma } = require("../prisma");
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
+const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { requireAuth } = require("../middleware/auth");
 
 const transfersRouter = Router();
@@ -40,11 +41,11 @@ transfersRouter.post("/", async (req, res, next) => {
     const [fromAccount, toAccount] = await Promise.all([
       prisma.account.findFirst({
         where: { id: body.fromAccountId, deletedAt: null },
-        select: { id: true, currency: true, walletsEnabled: true },
+        select: { id: true, currency: true, walletsEnabled: true, walletMigrationPending: true },
       }),
       prisma.account.findFirst({
         where: { id: body.toAccountId, deletedAt: null },
-        select: { id: true, currency: true, walletsEnabled: true },
+        select: { id: true, currency: true, walletsEnabled: true, walletMigrationPending: true },
       }),
     ]);
 
@@ -102,7 +103,13 @@ transfersRouter.post("/", async (req, res, next) => {
           type: "EXPENSE",
           deletedAt: null,
         },
-        select: { id: true },
+        select: {
+          id: true,
+          type: true,
+          internalKey: true,
+          lockedForManualEntry: true,
+          memberAccessRestricted: true,
+        },
       }),
       prisma.category.findFirst({
         where: {
@@ -111,7 +118,13 @@ transfersRouter.post("/", async (req, res, next) => {
           type: "INCOME",
           deletedAt: null,
         },
-        select: { id: true },
+        select: {
+          id: true,
+          type: true,
+          internalKey: true,
+          lockedForManualEntry: true,
+          memberAccessRestricted: true,
+        },
       }),
     ]);
 
@@ -127,26 +140,56 @@ transfersRouter.post("/", async (req, res, next) => {
       });
     }
 
-    if (body.fromWalletId) {
-      if (!fromAccount.walletsEnabled) {
-        return res.status(400).json({ error: "fromWalletId requires wallets on the source account" });
+    try {
+      await assertCategoryManualMemberAccess(prisma, {
+        accountId: fromAccount.id,
+        userId,
+        category: fromCategory,
+      });
+      await assertCategoryManualMemberAccess(prisma, {
+        accountId: toAccount.id,
+        userId,
+        category: toCategory,
+      });
+    } catch (e) {
+      if (e && e.statusCode === 403) {
+        return res.status(403).json({ error: "You do not have access to one of these categories" });
+      }
+      if (e && e.statusCode === 400) {
+        if (e.message === "MANUAL_LOCKED" || e.message === "SYS_CATEGORY") {
+          return res.status(400).json({ error: "This category cannot be used for transfers" });
+        }
+      }
+      throw e;
+    }
+
+    const fromWalletsLive = fromAccount.walletsEnabled || fromAccount.walletMigrationPending;
+    const toWalletsLive = toAccount.walletsEnabled || toAccount.walletMigrationPending;
+
+    if (fromWalletsLive) {
+      if (!body.fromWalletId) {
+        return res.status(400).json({ error: "fromWalletId is required when the source account uses wallets" });
       }
       const w = await prisma.accountWallet.findFirst({
         where: { id: body.fromWalletId, accountId: fromAccount.id, deletedAt: null },
         select: { id: true },
       });
       if (!w) return res.status(400).json({ error: "Invalid fromWalletId" });
+    } else if (body.fromWalletId) {
+      return res.status(400).json({ error: "fromWalletId requires wallets on the source account" });
     }
 
-    if (body.toWalletId) {
-      if (!toAccount.walletsEnabled) {
-        return res.status(400).json({ error: "toWalletId requires wallets on the destination account" });
+    if (toWalletsLive) {
+      if (!body.toWalletId) {
+        return res.status(400).json({ error: "toWalletId is required when the destination account uses wallets" });
       }
       const w = await prisma.accountWallet.findFirst({
         where: { id: body.toWalletId, accountId: toAccount.id, deletedAt: null },
         select: { id: true },
       });
       if (!w) return res.status(400).json({ error: "Invalid toWalletId" });
+    } else if (body.toWalletId) {
+      return res.status(400).json({ error: "toWalletId requires wallets on the destination account" });
     }
 
     const result = await prisma.$transaction(async (tx) => {
