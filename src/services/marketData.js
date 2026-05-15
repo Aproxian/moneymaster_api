@@ -415,21 +415,48 @@ async function fetchQuoteForInstrument(instrument) {
 
 /**
  * @param {{ id: string, providerSymbol: string, exchange?: string | null }[]} instruments
- * @param {{ skipBatchGap?: boolean }} [options] When true, omit `BATCH_GAP_MS` sleeps between Twelve Data
- *   HTTP calls inside this function (background sweep uses `TWELVEDATA_SWEEP_INTERVAL_MS` between ticks).
- *   Batch venue retries, serial batch recovery, and single-symbol fallback behave the same for sweep and
- *   manual chunk refresh so each slice can fill up to `TWELVEDATA_CREDITS_PER_MINUTE` instruments when the API allows.
+ * @param {{ skipBatchGap?: boolean, tryUnifiedSymbolOnlyFirst?: boolean }} [options]
+ *   `skipBatchGap`: omit `BATCH_GAP_MS` sleeps (sweep uses tick interval instead).
+ *   `tryUnifiedSymbolOnlyFirst`: for small batches (≤ `TWELVEDATA_QUOTE_BATCH_SIZE`), call Twelve Data once with
+ *   all tickers and **no** `exchange` / `mic_code` before splitting by venue. That avoids 7+7 credits when the
+ *   first MIC batch is empty but a plain multi-symbol request would succeed (typical Basic-plan blow-up).
  */
 async function fetchTwelveDataPrices(instruments, options = {}) {
   const skipBatchGap = Boolean(options.skipBatchGap);
+  const tryUnifiedSymbolOnlyFirst = Boolean(options.tryUnifiedSymbolOnlyFirst);
   if (!instruments.length) {
     return {};
   }
 
   const result = {};
 
+  let toFetch = instruments;
+  if (
+    tryUnifiedSymbolOnlyFirst &&
+    toFetch.length > 0 &&
+    toFetch.length <= BATCH_SIZE
+  ) {
+    const symbols = toFetch.map((x) => x.providerSymbol);
+    try {
+      const bySym = await fetchTwelveDataTimeSeriesBatch(symbols, {}, {});
+      for (const inst of toFetch) {
+        const su = sanitizeTwelveDataSymbol(inst.providerSymbol).toUpperCase();
+        const hit = bySym.get(su) || bySym.get(inst.providerSymbol);
+        if (hit) result[inst.id] = hit;
+      }
+    } catch (e) {
+      if (e instanceof TwelveDataApiError && isTwelveDataRateLimitError(e)) {
+        throw e;
+      }
+    }
+    toFetch = instruments.filter((i) => !result[i.id]);
+    if (!toFetch.length) {
+      return result;
+    }
+  }
+
   const groups = new Map();
-  for (const inst of instruments) {
+  for (const inst of toFetch) {
     const key = venueGroupKey(inst.exchange);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(inst);
@@ -638,7 +665,10 @@ async function refreshDailyQuotesForTwelveDataChunked(options = {}) {
 
   let pricesByInstrumentId;
   try {
-    pricesByInstrumentId = await fetchTwelveDataPrices(slice, { skipBatchGap });
+    pricesByInstrumentId = await fetchTwelveDataPrices(slice, {
+      skipBatchGap,
+      tryUnifiedSymbolOnlyFirst: true,
+    });
   } catch (e) {
     if (e instanceof TwelveDataApiError) {
       return {
