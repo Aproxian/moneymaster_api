@@ -159,6 +159,8 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
           costBasisMinor: {
             increment: body.amountMinor,
           },
+          // Clear soft-delete when re-buying an instrument that was previously fully cashed out.
+          deletedAt: null,
         },
         create: {
           accountId,

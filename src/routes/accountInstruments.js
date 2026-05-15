@@ -252,6 +252,7 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
           createdByUserId: userId,
           instrumentId,
           walletId,
+          investmentQuantity: -body.quantitySold,
         },
         select: {
           id: true,
