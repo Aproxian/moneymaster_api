@@ -1,9 +1,12 @@
 const { app } = require("./app");
 const { config } = require("./config");
+const { logApp } = require("./lib/fileLogger");
 const { stopTwelveDataBackgroundSweep } = require("./services/twelveDataRefreshScheduler");
 
 const server = app.listen(config.port, () => {
-  console.log(`API listening on http://localhost:${config.port}`);
+  const msg = `API listening on http://localhost:${config.port}`;
+  console.log(msg);
+  logApp("INFO", "Server", msg);
 });
 
 async function shutdown() {

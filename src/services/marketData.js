@@ -1,6 +1,7 @@
 const fetch = require("node-fetch");
 
 const { prisma } = require("../prisma");
+const { logApp } = require("../lib/fileLogger");
 
 const TWELVEDATA_BASE_URL =
   process.env.TWELVEDATA_BASE_URL || "https://api.twelvedata.com";
@@ -55,6 +56,25 @@ const REFRESH_MODE = String(process.env.TWELVEDATA_REFRESH_MODE || "chunk")
   .toLowerCase();
 
 const TWELVEDATA_STATE_ID = "TWELVEDATA";
+/** Set `TWELVEDATA_LOG_QUOTE_REQUESTS=1` to print each Twelve Data quote URL to server logs (api key redacted). */
+const LOG_TWELVE_DATA_QUOTES =
+  String(process.env.TWELVEDATA_LOG_QUOTE_REQUESTS || "").toLowerCase() === "1" ||
+  String(process.env.TWELVEDATA_LOG_QUOTE_REQUESTS || "").toLowerCase() === "true";
+
+function logTwelveDataRequestUrl(url) {
+  if (!LOG_TWELVE_DATA_QUOTES) return;
+  try {
+    const u = new URL(typeof url === "string" ? url : url.toString());
+    if (u.searchParams.has("apikey")) u.searchParams.set("apikey", "***");
+    const line = `[TwelveData] quote_request ${u.toString()}`;
+    // eslint-disable-next-line no-console -- intentional ops/debug aid
+    console.log(line);
+    logApp("INFO", "TwelveData", "quote_request", u.toString());
+  } catch {
+    /* ignore */
+  }
+}
+
 /** If true, retry each missed symbol with single-symbol requests (many HTTP calls — avoid on Basic). */
 const SINGLE_FALLBACK =
   String(process.env.TWELVEDATA_SINGLE_FALLBACK || "").toLowerCase() === "1" ||
@@ -64,6 +84,21 @@ const SINGLE_FALLBACK =
 const BATCH_COLON_RETRY =
   String(process.env.TWELVEDATA_BATCH_COLON_RETRY || "").toLowerCase() === "1" ||
   String(process.env.TWELVEDATA_BATCH_COLON_RETRY || "").toLowerCase() === "true";
+
+/**
+ * When a multi-symbol batch fails with TwelveDataApiError, fall back to one HTTP call per instrument
+ * with this many ms between calls (keeps Basic “8/min” plans from tripping even if `skipBatchGap` is true).
+ * Set `TWELVEDATA_SERIAL_ON_BATCH_ERROR=0` to disable and surface the batch error instead.
+ */
+const SERIAL_ON_BATCH_ERROR = (() => {
+  const s = String(process.env.TWELVEDATA_SERIAL_ON_BATCH_ERROR ?? "1").toLowerCase();
+  return s !== "0" && s !== "false";
+})();
+
+const SERIAL_GAP_MS = Math.max(
+  7500,
+  parseInt(process.env.TWELVEDATA_SERIAL_GAP_MS || "7500", 10)
+);
 
 /** Thrown when Twelve Data returns JSON `{ status: "error", code, message }` (often HTTP 200). */
 class TwelveDataApiError extends Error {
@@ -208,10 +243,10 @@ function parseTimeSeriesBatchResponse(data, symbolsForKeys) {
 }
 
 /**
- * Batch time_series: symbols share the same venue params (or none).
+ * Batch time_series: try several venue/symbol encodings (Twelve Data is picky about `mic_code` + multi-symbol).
  * @param {string[]} symbols upper or mixed case tickers
  * @param {{ exchange?: string, mic_code?: string }} venue
- * @param {{ exchangeRawForRetry?: string | null }} [options] Raw DB `exchange` for optional `SYM:EXCHANGE` retry
+ * @param {{ exchangeRawForRetry?: string | null }} [options] Raw DB `exchange` for fallbacks
  */
 async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
   if (!process.env.TWELVEDATA_API_KEY) {
@@ -221,6 +256,7 @@ async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
   if (!cleaned.length) return new Map();
 
   const keysUpper = cleaned.map((s) => s.toUpperCase());
+  const comma = cleaned.join(",");
 
   async function doFetch(symbolParam, v) {
     const url = new URL(`${TWELVEDATA_BASE_URL}/time_series`);
@@ -230,6 +266,8 @@ async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
     url.searchParams.set("apikey", process.env.TWELVEDATA_API_KEY);
     if (v.exchange) url.searchParams.set("exchange", v.exchange);
     if (v.mic_code) url.searchParams.set("mic_code", v.mic_code);
+
+    logTwelveDataRequestUrl(url);
 
     const res = await fetch(url.toString());
     if (!res.ok) {
@@ -241,16 +279,55 @@ async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
     return parseTimeSeriesBatchResponse(data, keysUpper);
   }
 
-  try {
-    return await doFetch(cleaned.join(","), venue);
-  } catch (e) {
-    if (!(e instanceof TwelveDataApiError) || !BATCH_COLON_RETRY) throw e;
-    const raw = String(options.exchangeRawForRetry || "").trim();
-    if (!raw || PSEUDO_EXCHANGES.has(raw.toUpperCase())) throw e;
-    const up = raw.toUpperCase();
-    const colonParam = cleaned.map((s) => `${s.toUpperCase()}:${up}`).join(",");
-    return await doFetch(colonParam, {});
+  const rawEx = String(options.exchangeRawForRetry || "").trim();
+  const rawUp = rawEx.toUpperCase();
+
+  const seen = new Set();
+  /** @type {{ symbolParam: string, v: { exchange?: string, mic_code?: string } }[]} */
+  const attempts = [];
+
+  function addAttempt(symbolParam, v) {
+    const k = `${symbolParam}|${v.exchange || ""}|${v.mic_code || ""}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    attempts.push({ symbolParam, v });
   }
+
+  addAttempt(comma, venue);
+
+  if (rawEx && !PSEUDO_EXCHANGES.has(rawUp)) {
+    const samePlainExchange =
+      venue.exchange && venue.exchange.trim().toUpperCase() === rawUp && !venue.mic_code;
+    if (!samePlainExchange) {
+      addAttempt(comma, { exchange: rawEx });
+    }
+  }
+
+  addAttempt(comma, {});
+
+  if (BATCH_COLON_RETRY && rawEx && !PSEUDO_EXCHANGES.has(rawUp)) {
+    addAttempt(
+      cleaned.map((s) => `${s.toUpperCase()}:${rawUp}`).join(","),
+      {}
+    );
+  }
+
+  /** @type {TwelveDataApiError | null} */
+  let lastTd = null;
+  for (const att of attempts) {
+    try {
+      const m = await doFetch(att.symbolParam, att.v);
+      if (m.size > 0) return m;
+    } catch (e) {
+      if (e instanceof TwelveDataApiError) {
+        lastTd = e;
+      } else {
+        throw e;
+      }
+    }
+  }
+  if (lastTd) throw lastTd;
+  return new Map();
 }
 
 async function fetchTwelveDataTimeSeriesSingle(symbol, venue) {
@@ -267,6 +344,8 @@ async function fetchTwelveDataTimeSeriesSingle(symbol, venue) {
   url.searchParams.set("apikey", process.env.TWELVEDATA_API_KEY);
   if (venue.exchange) url.searchParams.set("exchange", venue.exchange);
   if (venue.mic_code) url.searchParams.set("mic_code", venue.mic_code);
+
+  logTwelveDataRequestUrl(url);
 
   const res = await fetch(url.toString());
   if (!res.ok) {
@@ -285,7 +364,16 @@ async function fetchTwelveDataTimeSeriesSingle(symbol, venue) {
 async function fetchQuoteForInstrument(instrument) {
   const sym = instrument.providerSymbol;
   const primary = venueQueryParams(instrument.exchange);
-  const tries = [primary, {}];
+  const rawEx = String(instrument.exchange || "").trim();
+  const rawUp = rawEx.toUpperCase();
+
+  /** @type {{ exchange?: string, mic_code?: string }[]} */
+  const tries = [primary];
+  if (rawEx && !PSEUDO_EXCHANGES.has(rawUp) && primary.mic_code) {
+    tries.push({ exchange: rawEx });
+  }
+  tries.push({});
+
   const seen = new Set();
   for (const venue of tries) {
     const key = JSON.stringify(venue);
@@ -332,8 +420,27 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
           exchangeRawForRetry: list[0].exchange,
         });
       } catch (e) {
-        if (e instanceof TwelveDataApiError) throw e;
-        bySym = new Map();
+        if (e instanceof TwelveDataApiError && SERIAL_ON_BATCH_ERROR) {
+          for (let idx = 0; idx < chunk.length; idx++) {
+            const inst = chunk[idx];
+            try {
+              const q = await fetchQuoteForInstrument(inst);
+              if (q) {
+                const su = sanitizeTwelveDataSymbol(inst.providerSymbol).toUpperCase();
+                bySym.set(su, q);
+              }
+            } catch (e2) {
+              if (e2 instanceof TwelveDataApiError) throw e2;
+            }
+            if (idx < chunk.length - 1 && SERIAL_GAP_MS > 0) {
+              await sleep(SERIAL_GAP_MS);
+            }
+          }
+        } else if (e instanceof TwelveDataApiError) {
+          throw e;
+        } else {
+          bySym = new Map();
+        }
       }
 
       for (const inst of chunk) {

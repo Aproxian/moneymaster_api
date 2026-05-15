@@ -6,8 +6,26 @@ const {
   refreshDailyQuotesForTwelveDataChunked,
   getTwelveDataCreditsPerTick,
 } = require("./marketData");
+const { logApp } = require("../lib/fileLogger");
 
 const TWELVEDATA_STATE_ID = "TWELVEDATA";
+
+/** Mirror to console (hosting) and daily file under `logs/` (see `MONEYMASTER_LOG_DIR`). */
+function sweepLog(level, message, detail) {
+  const prefix = "[TwelveDataSweep]";
+  if (level === "warn") {
+    // eslint-disable-next-line no-console -- paired with file log
+    console.warn(prefix, message, detail !== undefined ? detail : "");
+  } else if (level === "error") {
+    // eslint-disable-next-line no-console -- paired with file log
+    console.error(prefix, message, detail !== undefined ? detail : "");
+  } else {
+    // eslint-disable-next-line no-console -- paired with file log
+    console.log(prefix, message, detail !== undefined ? detail : "");
+  }
+  const lev = level === "warn" ? "WARN" : level === "error" ? "ERROR" : "INFO";
+  logApp(lev, "TwelveDataSweep", message, detail);
+}
 
 const SWEEP_INTERVAL_MS = Math.max(
   5_000,
@@ -73,8 +91,7 @@ async function clearPersistedSweepSession() {
       },
     });
   } catch (e) {
-    // eslint-disable-next-line no-console -- avoid silent failure
-    console.error("[TwelveDataSweep] clearPersistedSweepSession failed:", e);
+    sweepLog("error", "clearPersistedSweepSession failed", e);
   }
 }
 
@@ -85,8 +102,7 @@ async function touchSweepHeartbeat() {
       data: { backgroundSweepLastTickAt: new Date() },
     });
   } catch (e) {
-    // eslint-disable-next-line no-console -- avoid silent failure
-    console.error("[TwelveDataSweep] heartbeat update failed:", e);
+    sweepLog("error", "heartbeat update failed", e);
   }
 }
 
@@ -94,6 +110,7 @@ async function touchSweepHeartbeat() {
  * Stop the in-process timer and clear DB-backed sweep session flags (any Node instance).
  */
 async function stopTwelveDataBackgroundSweep() {
+  sweepLog("info", "stopTwelveDataBackgroundSweep invoked");
   clearLocalSweepIntervalAndMemory();
   lastCompletedTick = null;
   lastTwelveDataError = null;
@@ -318,6 +335,7 @@ async function startTwelveDataBackgroundSweep(options) {
       select: { backgroundSweepCancelRequested: true },
     });
     if (cancelRow?.backgroundSweepCancelRequested) {
+      sweepLog("info", "tick loop exiting (backgroundSweepCancelRequested)");
       await clearPersistedSweepSession();
       clearLocalSweepIntervalAndMemory();
       lastCompletedTick = null;
@@ -327,8 +345,7 @@ async function startTwelveDataBackgroundSweep(options) {
     }
 
     if (sweepBusy) {
-      // eslint-disable-next-line no-console -- operational visibility
-      console.warn("[TwelveDataSweep] previous tick still running; skipping this interval");
+      sweepLog("warn", "previous tick still running; skipping this interval");
       return;
     }
     sweepBusy = true;
@@ -353,23 +370,18 @@ async function startTwelveDataBackgroundSweep(options) {
         twelveDataError: result.twelveDataError ?? null,
       };
 
-      // eslint-disable-next-line no-console -- operational visibility (tail logs / journal)
-      console.log(
-        "[TwelveDataSweep] tick",
-        JSON.stringify({
-          quotesCreated: result.quotesCreated ?? 0,
-          sliceLen: result.processedThisTick,
-          offsetStart: result.offsetStart,
-          nextOffset: result.nextOffset,
-          total: result.instrumentsCount,
-          cycleJustCompleted: Boolean(result.cycleJustCompleted),
-          error: result.twelveDataError ?? null,
-        })
-      );
+      sweepLog("info", "tick", {
+        quotesCreated: result.quotesCreated ?? 0,
+        sliceLen: result.processedThisTick,
+        offsetStart: result.offsetStart,
+        nextOffset: result.nextOffset,
+        total: result.instrumentsCount,
+        cycleJustCompleted: Boolean(result.cycleJustCompleted),
+        error: result.twelveDataError ?? null,
+      });
 
       if (result.twelveDataError) {
-        // eslint-disable-next-line no-console -- operational visibility
-        console.warn("[TwelveDataSweep] Twelve Data error (cursor not advanced):", result.twelveDataError);
+        sweepLog("warn", "Twelve Data error (cursor not advanced)", result.twelveDataError);
         return;
       }
 
@@ -385,8 +397,7 @@ async function startTwelveDataBackgroundSweep(options) {
             data: { lastBackgroundSweepCompletedDate: day },
           });
         } catch (persistErr) {
-          // eslint-disable-next-line no-console -- avoid silent failure
-          console.error("[TwelveDataSweep] lastBackgroundSweepCompletedDate update failed:", persistErr);
+          sweepLog("error", "lastBackgroundSweepCompletedDate update failed", persistErr);
         }
         try {
           await prisma.auditLog.create({
@@ -403,8 +414,7 @@ async function startTwelveDataBackgroundSweep(options) {
             },
           });
         } catch (e) {
-          // eslint-disable-next-line no-console -- avoid silent failure
-          console.error("[TwelveDataSweep] audit log failed:", e);
+          sweepLog("error", "audit log failed", e);
         }
       }
     } catch (e) {
@@ -420,8 +430,7 @@ async function startTwelveDataBackgroundSweep(options) {
         cycleJustCompleted: false,
         twelveDataError: null,
       };
-      // eslint-disable-next-line no-console -- avoid silent failure
-      console.error("[TwelveDataSweep] tick failed:", e);
+      sweepLog("error", "tick failed", e);
     } finally {
       sweepBusy = false;
       if (intervalId != null) {
@@ -435,6 +444,14 @@ async function startTwelveDataBackgroundSweep(options) {
   }, SWEEP_INTERVAL_MS);
 
   void runTick();
+
+  sweepLog("info", "background sweep started", {
+    userId,
+    intervalMs: SWEEP_INTERVAL_MS,
+    instrumentsCount: total,
+    creditsPerTick: credits,
+    resetCycle: Boolean(options.resetCycle),
+  });
 
   return {
     ok: true,

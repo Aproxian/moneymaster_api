@@ -7,6 +7,7 @@ const { requireAuth } = require("../middleware/auth");
 const { isAdminUserEmail } = require("../lib/adminUser");
 const { processPendingSchedulesForUser } = require("../services/processPendingSchedules");
 const { getMaintenanceState, setMaintenanceState } = require("../services/globalAppState");
+const { logApp } = require("../lib/fileLogger");
 
 const meRouter = Router();
 
@@ -91,6 +92,7 @@ meRouter.get("/me", requireAuth, async (req, res) => {
   await processPendingSchedulesForUser(userId).catch((err) => {
     // eslint-disable-next-line no-console -- operational visibility
     console.error("[schedules] GET /me", err?.message || err);
+    logApp("ERROR", "Schedules", "GET /me", err instanceof Error ? err : { message: String(err) });
   });
 
   return res.json({

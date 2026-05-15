@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 
+const { logApp } = require("./lib/fileLogger");
+
 const { authRouter } = require("./routes/auth");
 const { meRouter } = require("./routes/me");
 const { accountsRouter } = require("./routes/accounts");
@@ -26,10 +28,10 @@ app.use(cors({ origin: true, credentials: true }));
 // Explicit bytes: bulk CSV can exceed 100kb default (Express / body-parser).
 const JSON_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
 app.use(express.json({ limit: JSON_BODY_LIMIT_BYTES }));
+const bodyLimitMsg = `[MoneyMASTER] express.json body limit: ${(JSON_BODY_LIMIT_BYTES / (1024 * 1024)).toFixed(0)} MiB`;
 // eslint-disable-next-line no-console -- startup diagnostic (confirms limit is applied)
-console.info(
-  `[MoneyMASTER] express.json body limit: ${(JSON_BODY_LIMIT_BYTES / (1024 * 1024)).toFixed(0)} MiB`
-);
+console.info(bodyLimitMsg);
+logApp("INFO", "App", bodyLimitMsg);
 
 app.use("/auth", authRouter);
 app.use("/accounts", accountsRouter);
@@ -47,6 +49,7 @@ app.use("/", meRouter);
 // Basic error handler
 app.use((err, _req, res, _next) => {
   console.error(err);
+  logApp("ERROR", "Express", "unhandled route error", err instanceof Error ? err : { message: String(err) });
   const tooLarge =
     err?.type === "entity.too.large" ||
     err?.name === "PayloadTooLargeError" ||

@@ -1,4 +1,5 @@
 const { prisma } = require("../prisma");
+const { logApp } = require("../lib/fileLogger");
 const { advanceScheduleUtc } = require("./advanceRecurrence");
 const { materializeScheduledPayload } = require("./materializeScheduledPayload");
 
@@ -85,6 +86,10 @@ async function processPendingSchedulesForUser(userId) {
     } catch (err) {
       // eslint-disable-next-line no-console -- operational visibility
       console.error("[schedules] failed row", sch.id, err?.message || err);
+      logApp("ERROR", "Schedules", "failed row", {
+        scheduleId: sch.id,
+        error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
+      });
     }
   }
 }

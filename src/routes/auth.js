@@ -9,6 +9,7 @@ const { config } = require("../config");
 const { seedDefaultCategories } = require("../services/seedDefaultCategories");
 const { isAdminUserEmail } = require("../lib/adminUser");
 const { processPendingSchedulesForUser } = require("../services/processPendingSchedules");
+const { logApp } = require("../lib/fileLogger");
 
 const authRouter = Router();
 
@@ -125,6 +126,7 @@ authRouter.post("/register", async (req, res, next) => {
     await processPendingSchedulesForUser(result.user.id).catch((err) => {
       // eslint-disable-next-line no-console -- operational visibility
       console.error("[schedules] register hook", err?.message || err);
+      logApp("ERROR", "Schedules", "register hook", err instanceof Error ? err : { message: String(err) });
     });
 
     return res.status(201).json({
@@ -199,6 +201,7 @@ authRouter.post("/login", async (req, res, next) => {
     await processPendingSchedulesForUser(user.id).catch((err) => {
       // eslint-disable-next-line no-console -- operational visibility
       console.error("[schedules] login hook", err?.message || err);
+      logApp("ERROR", "Schedules", "login hook", err instanceof Error ? err : { message: String(err) });
     });
 
     return res.json({
@@ -278,6 +281,7 @@ authRouter.post("/refresh", async (req, res, next) => {
     await processPendingSchedulesForUser(refreshedUserId).catch((err) => {
       // eslint-disable-next-line no-console -- operational visibility
       console.error("[schedules] refresh hook", err?.message || err);
+      logApp("ERROR", "Schedules", "refresh hook", err instanceof Error ? err : { message: String(err) });
     });
 
     return res.json({ accessToken, refreshToken: newRefreshToken });
