@@ -353,7 +353,10 @@ async function startTwelveDataBackgroundSweep(options) {
       const resetCycle = pendingFirstReset;
       pendingFirstReset = false;
 
-      const result = await refreshDailyQuotesForTwelveDataChunked({ resetCycle });
+      const result = await refreshDailyQuotesForTwelveDataChunked({
+        resetCycle,
+        skipBatchGap: true,
+      });
       quotesCreatedThisSweep += result.quotesCreated || 0;
 
       lastTwelveDataError = result.twelveDataError ?? null;

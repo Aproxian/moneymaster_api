@@ -246,6 +246,13 @@ function parseTimeSeriesBatchResponse(data, symbolsForKeys) {
   return bySym;
 }
 
+function batchCoversAllSymbols(bySym, keysUpper) {
+  for (const k of keysUpper) {
+    if (!bySym.has(k)) return false;
+  }
+  return true;
+}
+
 /**
  * Batch time_series: try several venue/symbol encodings (Twelve Data is picky about `mic_code` + multi-symbol).
  * @param {string[]} symbols upper or mixed case tickers
@@ -325,10 +332,15 @@ async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
 
   /** @type {TwelveDataApiError | null} */
   let lastTd = null;
+  /** Merged quotes from all attempts (later attempts can fill gaps left by earlier partial parses). */
+  const merged = new Map();
   for (const att of attemptsToRun) {
     try {
       const m = await doFetch(att.symbolParam, att.v);
-      if (m.size > 0) return m;
+      for (const [k, v] of m) {
+        merged.set(k, v);
+      }
+      if (batchCoversAllSymbols(merged, keysUpper)) return merged;
     } catch (e) {
       if (e instanceof TwelveDataApiError) {
         if (isTwelveDataRateLimitError(e)) throw e;
@@ -338,8 +350,8 @@ async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
       }
     }
   }
-  if (lastTd) throw lastTd;
-  return new Map();
+  if (lastTd && merged.size === 0) throw lastTd;
+  return merged;
 }
 
 async function fetchTwelveDataTimeSeriesSingle(symbol, venue) {
@@ -404,9 +416,9 @@ async function fetchQuoteForInstrument(instrument) {
 /**
  * @param {{ id: string, providerSymbol: string, exchange?: string | null }[]} instruments
  * @param {{ skipBatchGap?: boolean }} [options] When true, omit `BATCH_GAP_MS` sleeps between Twelve Data
- *   HTTP calls (used by chunk refresh so `TWELVEDATA_SWEEP_INTERVAL_MS` is the only throttle between slices).
- *   Also enforces **one batch HTTP attempt per venue group** (no multi-venue retries) and skips serial/single
- *   fallbacks so one tick stays within ~`TWELVEDATA_CREDITS_PER_MINUTE` credits.
+ *   HTTP calls inside this function (background sweep uses `TWELVEDATA_SWEEP_INTERVAL_MS` between ticks).
+ *   Batch venue retries, serial batch recovery, and single-symbol fallback behave the same for sweep and
+ *   manual chunk refresh so each slice can fill up to `TWELVEDATA_CREDITS_PER_MINUTE` instruments when the API allows.
  */
 async function fetchTwelveDataPrices(instruments, options = {}) {
   const skipBatchGap = Boolean(options.skipBatchGap);
@@ -432,13 +444,12 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
       try {
         bySym = await fetchTwelveDataTimeSeriesBatch(symbols, venue, {
           exchangeRawForRetry: list[0].exchange,
-          ...(skipBatchGap ? { maxVenueAttempts: 1 } : {}),
         });
       } catch (e) {
         if (e instanceof TwelveDataApiError && isTwelveDataRateLimitError(e)) {
           throw e;
         }
-        if (e instanceof TwelveDataApiError && SERIAL_ON_BATCH_ERROR && !skipBatchGap) {
+        if (e instanceof TwelveDataApiError && SERIAL_ON_BATCH_ERROR) {
           for (let idx = 0; idx < chunk.length; idx++) {
             const inst = chunk[idx];
             try {
@@ -467,7 +478,7 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
         if (hit) result[inst.id] = hit;
       }
 
-      if (SINGLE_FALLBACK && !skipBatchGap) {
+      if (SINGLE_FALLBACK) {
         for (const inst of chunk) {
           if (result[inst.id]) continue;
           try {
@@ -574,6 +585,8 @@ async function refreshDailyQuotesForTwelveDataAll() {
  */
 async function refreshDailyQuotesForTwelveDataChunked(options = {}) {
   const resetCycle = Boolean(options.resetCycle);
+  /** When true (background sweep), omit `BATCH_GAP_MS` inside fetch; same quote resolution as manual chunk. */
+  const skipBatchGap = Boolean(options.skipBatchGap);
   const instruments = await loadTwelveDataInstrumentsOrdered();
   const total = instruments.length;
 
@@ -625,7 +638,7 @@ async function refreshDailyQuotesForTwelveDataChunked(options = {}) {
 
   let pricesByInstrumentId;
   try {
-    pricesByInstrumentId = await fetchTwelveDataPrices(slice, { skipBatchGap: true });
+    pricesByInstrumentId = await fetchTwelveDataPrices(slice, { skipBatchGap });
   } catch (e) {
     if (e instanceof TwelveDataApiError) {
       return {
@@ -711,7 +724,9 @@ async function refreshDailyQuotesForTwelveDataChunked(options = {}) {
 }
 
 /**
- * @param {{ resetCycle?: boolean }} [options]
+ * @param {{ resetCycle?: boolean, skipBatchGap?: boolean }} [options]
+ *   `skipBatchGap` is true for background sweep only: omits `BATCH_GAP_MS` sleeps between internal Twelve Data calls
+ *   (sweep interval still spaces ticks). Quote resolution is the same as manual chunk refresh.
  */
 async function refreshDailyQuotesForTwelveData(options = {}) {
   if (REFRESH_MODE === "all") {
