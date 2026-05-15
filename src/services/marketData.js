@@ -109,6 +109,10 @@ class TwelveDataApiError extends Error {
   }
 }
 
+function isTwelveDataRateLimitError(e) {
+  return e instanceof TwelveDataApiError && (e.code === 429 || e.code === "429");
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -246,7 +250,8 @@ function parseTimeSeriesBatchResponse(data, symbolsForKeys) {
  * Batch time_series: try several venue/symbol encodings (Twelve Data is picky about `mic_code` + multi-symbol).
  * @param {string[]} symbols upper or mixed case tickers
  * @param {{ exchange?: string, mic_code?: string }} venue
- * @param {{ exchangeRawForRetry?: string | null }} [options] Raw DB `exchange` for fallbacks
+ * @param {{ exchangeRawForRetry?: string | null, maxVenueAttempts?: number }} [options] Raw DB `exchange` for fallbacks.
+ *   `maxVenueAttempts` caps venue/symbol-encoding retries (each attempt can cost a full batch of credits).
  */
 async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
   if (!process.env.TWELVEDATA_API_KEY) {
@@ -312,14 +317,21 @@ async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
     );
   }
 
+  const maxAtt =
+    typeof options.maxVenueAttempts === "number" && options.maxVenueAttempts > 0
+      ? options.maxVenueAttempts
+      : attempts.length;
+  const attemptsToRun = attempts.slice(0, Math.min(maxAtt, attempts.length));
+
   /** @type {TwelveDataApiError | null} */
   let lastTd = null;
-  for (const att of attempts) {
+  for (const att of attemptsToRun) {
     try {
       const m = await doFetch(att.symbolParam, att.v);
       if (m.size > 0) return m;
     } catch (e) {
       if (e instanceof TwelveDataApiError) {
+        if (isTwelveDataRateLimitError(e)) throw e;
         lastTd = e;
       } else {
         throw e;
@@ -393,6 +405,8 @@ async function fetchQuoteForInstrument(instrument) {
  * @param {{ id: string, providerSymbol: string, exchange?: string | null }[]} instruments
  * @param {{ skipBatchGap?: boolean }} [options] When true, omit `BATCH_GAP_MS` sleeps between Twelve Data
  *   HTTP calls (used by chunk refresh so `TWELVEDATA_SWEEP_INTERVAL_MS` is the only throttle between slices).
+ *   Also enforces **one batch HTTP attempt per venue group** (no multi-venue retries) and skips serial/single
+ *   fallbacks so one tick stays within ~`TWELVEDATA_CREDITS_PER_MINUTE` credits.
  */
 async function fetchTwelveDataPrices(instruments, options = {}) {
   const skipBatchGap = Boolean(options.skipBatchGap);
@@ -418,9 +432,13 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
       try {
         bySym = await fetchTwelveDataTimeSeriesBatch(symbols, venue, {
           exchangeRawForRetry: list[0].exchange,
+          ...(skipBatchGap ? { maxVenueAttempts: 1 } : {}),
         });
       } catch (e) {
-        if (e instanceof TwelveDataApiError && SERIAL_ON_BATCH_ERROR) {
+        if (e instanceof TwelveDataApiError && isTwelveDataRateLimitError(e)) {
+          throw e;
+        }
+        if (e instanceof TwelveDataApiError && SERIAL_ON_BATCH_ERROR && !skipBatchGap) {
           for (let idx = 0; idx < chunk.length; idx++) {
             const inst = chunk[idx];
             try {
@@ -449,7 +467,7 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
         if (hit) result[inst.id] = hit;
       }
 
-      if (SINGLE_FALLBACK) {
+      if (SINGLE_FALLBACK && !skipBatchGap) {
         for (const inst of chunk) {
           if (result[inst.id]) continue;
           try {
