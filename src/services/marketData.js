@@ -113,6 +113,125 @@ function isTwelveDataRateLimitError(e) {
   return e instanceof TwelveDataApiError && (e.code === 429 || e.code === "429");
 }
 
+/** Twelve Data returns HTTP 200 with e.g. code 404 and a plan upsell message for `/quote` and `time_series`. */
+function isTwelveDataPlanTierRestriction(code, message) {
+  const c = code === 404 || code === "404" || Number(code) === 404;
+  if (!c) return false;
+  const m = String(message || "").toLowerCase();
+  return m.includes("pro or venture") || m.includes("venture plan");
+}
+
+function autoDeactivatePlanRestrictedSymbolsEnabled() {
+  return !String(process.env.TWELVEDATA_AUTO_DEACTIVATE_PLAN_SYMBOLS ?? "1").match(/^(0|false|off)$/i);
+}
+
+/**
+ * @param {Set<string> | string[]} tickerUppers sanitized upper tickers (e.g. TTM)
+ */
+async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
+  if (!autoDeactivatePlanRestrictedSymbolsEnabled()) return;
+  const want = new Set(
+    [...tickerUppers].map((t) => String(t).toUpperCase()).filter(Boolean)
+  );
+  if (want.size === 0) return;
+  try {
+    const rows = await prisma.instrument.findMany({
+      where: { provider: "TWELVEDATA", isActive: true },
+      select: { id: true, providerSymbol: true },
+    });
+    const ids = rows
+      .filter((r) => want.has(sanitizeTwelveDataSymbol(r.providerSymbol).toUpperCase()))
+      .map((r) => r.id);
+    if (ids.length === 0) return;
+    const res = await prisma.instrument.updateMany({
+      where: { id: { in: ids } },
+      data: { isActive: false },
+    });
+    logApp("WARN", "TwelveData", "auto_deactivated_plan_restricted_symbols", {
+      tickers: [...want],
+      rowsUpdated: res.count,
+    });
+  } catch (e) {
+    logApp(
+      "ERROR",
+      "TwelveData",
+      "auto_deactivate_plan_restricted_failed",
+      e instanceof Error ? e.message : String(e)
+    );
+  }
+}
+
+async function deactivateTwelveDataInstrumentById(instrumentId) {
+  if (!autoDeactivatePlanRestrictedSymbolsEnabled() || !instrumentId) return;
+  try {
+    const res = await prisma.instrument.updateMany({
+      where: { id: instrumentId, provider: "TWELVEDATA", isActive: true },
+      data: { isActive: false },
+    });
+    if (res.count > 0) {
+      logApp("WARN", "TwelveData", "auto_deactivated_plan_restricted_instrument", {
+        instrumentId,
+      });
+    }
+  } catch (e) {
+    logApp(
+      "ERROR",
+      "TwelveData",
+      "auto_deactivate_plan_restricted_failed",
+      e instanceof Error ? e.message : String(e)
+    );
+  }
+}
+
+/**
+ * Per-symbol plan errors inside a multi-symbol `time_series` body (global `status` may still be ok).
+ * @param {unknown} data
+ * @returns {Set<string>} upper tickers to deactivate
+ */
+function extractPlanRestrictedTickerUppersFromTimeSeriesPayload(data) {
+  const out = new Set();
+  if (!data || typeof data !== "object") return out;
+
+  const consider = (entry, keyHint) => {
+    if (!entry || typeof entry !== "object") return;
+    if (entry.status !== "error") return;
+    if (!isTwelveDataPlanTierRestriction(entry.code, entry.message)) return;
+    const raw = String(keyHint || entry.symbol || "").trim();
+    if (!raw) return;
+    const up = raw.toUpperCase();
+    const base = up.includes(":") ? up.split(":")[0] : up;
+    const cleaned = sanitizeTwelveDataSymbol(base).toUpperCase();
+    if (cleaned) out.add(cleaned);
+  };
+
+  if (Array.isArray(data.data)) {
+    for (const entry of data.data) {
+      consider(entry, entry?.symbol);
+    }
+  } else if (data.data && typeof data.data === "object" && !Array.isArray(data.data)) {
+    for (const [rawKey, entry] of Object.entries(data.data)) {
+      consider(entry, rawKey);
+    }
+  }
+
+  return out;
+}
+
+async function handleTwelveDataJsonBeforeThrow(data, keysUpperSingleSymbolBatch) {
+  const tierSyms = extractPlanRestrictedTickerUppersFromTimeSeriesPayload(data);
+  if (tierSyms.size > 0) {
+    await deactivateTwelveDataInstrumentsByTickerUppers(tierSyms);
+  }
+  if (
+    data?.status === "error" &&
+    !isMultiSymbolTimeSeriesShape(data) &&
+    isTwelveDataPlanTierRestriction(data.code, data.message) &&
+    keysUpperSingleSymbolBatch.length === 1
+  ) {
+    await deactivateTwelveDataInstrumentsByTickerUppers(new Set(keysUpperSingleSymbolBatch));
+  }
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -287,6 +406,7 @@ async function fetchTwelveDataTimeSeriesBatch(symbols, venue, options = {}) {
     }
 
     const data = await res.json();
+    await handleTwelveDataJsonBeforeThrow(data, keysUpper);
     throwIfTwelveDataGlobalError(data);
     return parseTimeSeriesBatchResponse(data, keysUpper);
   }
@@ -377,6 +497,7 @@ async function fetchTwelveDataTimeSeriesSingle(symbol, venue) {
   }
 
   const data = await res.json();
+  await handleTwelveDataJsonBeforeThrow(data, [sanitizeTwelveDataSymbol(symbol).toUpperCase()]);
   throwIfTwelveDataGlobalError(data);
   const now = new Date();
   return parseTimeSeriesPayload(data, now);
@@ -384,8 +505,9 @@ async function fetchTwelveDataTimeSeriesSingle(symbol, venue) {
 
 /**
  * Try venue-specific params, then symbol-only (fixes wrong MIC vs exchange and pseudo-venues).
+ * @param {{ maxVenueTries?: number }} [opts] When set (e.g. 1), only the first distinct venue is tried (saves credits after a unified batch already ran).
  */
-async function fetchQuoteForInstrument(instrument) {
+async function fetchQuoteForInstrument(instrument, opts = {}) {
   const sym = instrument.providerSymbol;
   const primary = venueQueryParams(instrument.exchange);
   const rawEx = String(instrument.exchange || "").trim();
@@ -399,15 +521,32 @@ async function fetchQuoteForInstrument(instrument) {
   tries.push({});
 
   const seen = new Set();
+  /** @type {{ exchange?: string, mic_code?: string }[]} */
+  const venueList = [];
   for (const venue of tries) {
     const key = JSON.stringify(venue);
     if (seen.has(key)) continue;
     seen.add(key);
+    venueList.push(venue);
+  }
+
+  const maxV =
+    typeof opts.maxVenueTries === "number" && opts.maxVenueTries > 0
+      ? Math.min(opts.maxVenueTries, venueList.length)
+      : venueList.length;
+
+  for (let vi = 0; vi < maxV; vi++) {
+    const venue = venueList[vi];
     try {
       const q = await fetchTwelveDataTimeSeriesSingle(sym, venue);
       if (q) return q;
     } catch (e) {
-      if (e instanceof TwelveDataApiError) throw e;
+      if (e instanceof TwelveDataApiError) {
+        if (isTwelveDataPlanTierRestriction(e.code, e.message)) {
+          await deactivateTwelveDataInstrumentById(instrument.id);
+        }
+        throw e;
+      }
     }
   }
   return null;
@@ -471,6 +610,7 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
       try {
         bySym = await fetchTwelveDataTimeSeriesBatch(symbols, venue, {
           exchangeRawForRetry: list[0].exchange,
+          ...(chunk.length === 1 ? { maxVenueAttempts: 1 } : {}),
         });
       } catch (e) {
         if (e instanceof TwelveDataApiError && isTwelveDataRateLimitError(e)) {
@@ -480,7 +620,9 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
           for (let idx = 0; idx < chunk.length; idx++) {
             const inst = chunk[idx];
             try {
-              const q = await fetchQuoteForInstrument(inst);
+              const q = await fetchQuoteForInstrument(inst, {
+                maxVenueTries: tryUnifiedSymbolOnlyFirst ? 1 : undefined,
+              });
               if (q) {
                 const su = sanitizeTwelveDataSymbol(inst.providerSymbol).toUpperCase();
                 bySym.set(su, q);
@@ -509,7 +651,9 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
         for (const inst of chunk) {
           if (result[inst.id]) continue;
           try {
-            const q = await fetchQuoteForInstrument(inst);
+            const q = await fetchQuoteForInstrument(inst, {
+              maxVenueTries: tryUnifiedSymbolOnlyFirst ? 1 : undefined,
+            });
             if (q) result[inst.id] = q;
           } catch (e) {
             if (e instanceof TwelveDataApiError) throw e;
