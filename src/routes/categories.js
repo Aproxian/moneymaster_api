@@ -3,6 +3,7 @@ const { z } = require("zod");
 
 const { prisma } = require("../prisma");
 const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
+const { TRANSFER_RECEIVE, TRANSFER_SEND } = require("../lib/transferCategoryKeys");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { seedDefaultCategories } = require("../services/seedDefaultCategories");
@@ -656,11 +657,15 @@ categoriesRouter.delete("/:categoryId", async (req, res, next) => {
         accountId,
         deletedAt: null,
       },
-      select: { id: true },
+      select: { id: true, internalKey: true },
     });
 
     if (!existing) {
       return res.status(404).json({ error: "Category not found" });
+    }
+
+    if (existing.internalKey === TRANSFER_SEND || existing.internalKey === TRANSFER_RECEIVE) {
+      return res.status(400).json({ error: "Transfer categories cannot be deleted" });
     }
 
     await prisma.category.update({
