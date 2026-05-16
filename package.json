@@ -14,6 +14,7 @@
     "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
   },
   "scripts": {
+    "test": "node --test",
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "prisma:check-env": "node -e \"require('dotenv').config();console.log('CWD:',process.cwd());console.log('NODE:',process.version);const u=process.env.DATABASE_URL;let d='MISSING';if(u){try{const x=new URL(u);d='set ('+x.protocol+'//'+x.hostname+(x.port?':'+x.port:'')+')';}catch(e){d='set (unparseable)';}}console.log('DATABASE_URL:',d);\"",

@@ -6,41 +6,17 @@ const { TRANSFER_RECEIVE, TRANSFER_SEND } = require("../lib/transferCategoryKeys
  * @param {string} accountId
  */
 async function ensureTransferCategories(tx, accountId) {
-  let send = await tx.category.findFirst({
-    where: { accountId, internalKey: TRANSFER_SEND, deletedAt: null },
-    select: { id: true },
+  const send = await ensureTransferCategory(tx, accountId, TRANSFER_SEND, {
+    type: "EXPENSE",
+    name: "Transfer (send)",
+    icon: "↗️",
   });
-  if (!send) {
-    send = await tx.category.create({
-      data: {
-        accountId,
-        type: "EXPENSE",
-        name: "Transfer (send)",
-        icon: "↗️",
-        internalKey: TRANSFER_SEND,
-        lockedForManualEntry: true,
-      },
-      select: { id: true },
-    });
-  }
 
-  let recv = await tx.category.findFirst({
-    where: { accountId, internalKey: TRANSFER_RECEIVE, deletedAt: null },
-    select: { id: true },
+  const recv = await ensureTransferCategory(tx, accountId, TRANSFER_RECEIVE, {
+    type: "INCOME",
+    name: "Transfer (receive)",
+    icon: "↙️",
   });
-  if (!recv) {
-    recv = await tx.category.create({
-      data: {
-        accountId,
-        type: "INCOME",
-        name: "Transfer (receive)",
-        icon: "↙️",
-        internalKey: TRANSFER_RECEIVE,
-        lockedForManualEntry: true,
-      },
-      select: { id: true },
-    });
-  }
 
   await tx.category.updateMany({
     where: {
@@ -52,6 +28,42 @@ async function ensureTransferCategories(tx, accountId) {
   });
 
   return { sendCategoryId: send.id, receiveCategoryId: recv.id };
+}
+
+async function ensureTransferCategory(tx, accountId, internalKey, defaults) {
+  const active = await tx.category.findFirst({
+    where: { accountId, internalKey, deletedAt: null },
+    select: { id: true },
+  });
+  if (active) return active;
+
+  const softDeleted = await tx.category.findFirst({
+    where: { accountId, internalKey, deletedAt: { not: null } },
+    select: { id: true },
+  });
+  if (softDeleted) {
+    return tx.category.update({
+      where: { id: softDeleted.id },
+      data: {
+        deletedAt: null,
+        type: defaults.type,
+        icon: defaults.icon,
+        internalKey,
+        lockedForManualEntry: true,
+      },
+      select: { id: true },
+    });
+  }
+
+  return tx.category.create({
+    data: {
+      accountId,
+      ...defaults,
+      internalKey,
+      lockedForManualEntry: true,
+    },
+    select: { id: true },
+  });
 }
 
 module.exports = { ensureTransferCategories };
