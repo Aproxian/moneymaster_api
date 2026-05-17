@@ -127,6 +127,26 @@ async function syncNewMemberCategoryAccess(client, accountId, newUserId) {
 }
 
 /**
+ * Remove a user's explicit category grants for a single account when they leave that account.
+ * @param {import('@prisma/client').PrismaClient | import('@prisma/client').Prisma.TransactionClient} client
+ */
+async function clearMemberCategoryAccessForAccount(client, accountId, userId) {
+  const cats = await client.category.findMany({
+    where: { accountId },
+    select: { id: true },
+  });
+  const categoryIds = cats.map((c) => c.id);
+  if (categoryIds.length === 0) return { count: 0 };
+
+  return client.categoryMemberAccess.deleteMany({
+    where: {
+      userId,
+      categoryId: { in: categoryIds },
+    },
+  });
+}
+
+/**
  * @param {import('@prisma/client').PrismaClient | import('@prisma/client').Prisma.TransactionClient} client
  */
 async function getCategoryMemberAccessState(client, { accountId, categoryId }) {
@@ -241,6 +261,7 @@ module.exports = {
   computeManualEntryAllowedForMe,
   assertCategoryManualMemberAccess,
   syncNewMemberCategoryAccess,
+  clearMemberCategoryAccessForAccount,
   getCategoryMemberAccessState,
   setCategoryMemberAccess,
   sortMembersForLockUi,

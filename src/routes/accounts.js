@@ -17,6 +17,7 @@ const {
 const {
   getPrimaryOwnerUserId,
   syncNewMemberCategoryAccess,
+  clearMemberCategoryAccessForAccount,
   sortMembersForLockUi,
 } = require("../services/categoryMemberAccess");
 
@@ -372,27 +373,31 @@ accountsRouter.delete(
         select: { name: true },
       });
 
-      await prisma.accountMember.delete({
-        where: { userId_accountId: { userId: memberUserId, accountId } },
-      });
+      await prisma.$transaction(async (tx) => {
+        await tx.accountMember.delete({
+          where: { userId_accountId: { userId: memberUserId, accountId } },
+        });
 
-      await prisma.membershipNotice.create({
-        data: {
-          userId: memberUserId,
-          kind: "REMOVED",
-          accountId,
-          accountName: accountBrief?.name ?? null,
-        },
-      });
+        await clearMemberCategoryAccessForAccount(tx, accountId, memberUserId);
 
-      await prisma.auditLog.create({
-        data: {
-          userId: requesterId,
-          action: "MEMBER_REMOVE",
-          entity: "Account",
-          entityId: accountId,
-          meta: { removedUserId: memberUserId },
-        },
+        await tx.membershipNotice.create({
+          data: {
+            userId: memberUserId,
+            kind: "REMOVED",
+            accountId,
+            accountName: accountBrief?.name ?? null,
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            userId: requesterId,
+            action: "MEMBER_REMOVE",
+            entity: "Account",
+            entityId: accountId,
+            meta: { removedUserId: memberUserId },
+          },
+        });
       });
 
       return res.status(204).send();
