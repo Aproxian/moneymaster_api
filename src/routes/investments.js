@@ -55,14 +55,16 @@ function rejectCronNonSweepBody(req, res, backgroundSweep, cancelBackgroundSweep
   return true;
 }
 
+async function assertAdminUnlessCron(req, res) {
+  if (req.refreshDailyCron) return true;
+  const user = await assertAdmin(req, res);
+  return Boolean(user);
+}
+
 /** Poll while a background sweep runs (same auth as POST /refresh-daily: JWT admin or cron header). */
 investmentsRouter.get("/twelve-data-sweep-status", refreshDailyAuth, async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
-      const user = await assertAdmin(req, res);
-      if (!user) return;
-    }
+    if (!(await assertAdminUnlessCron(req, res))) return;
     const live = await getTwelveDataSweepLiveStatus();
     return res.json({
       provider: "TWELVEDATA",
@@ -92,11 +94,7 @@ investmentsRouter.post("/refresh-daily", refreshDailyAuth, async (req, res, next
       return;
     }
 
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
-      const user = await assertAdmin(req, res);
-      if (!user) return;
-    }
+    if (!(await assertAdminUnlessCron(req, res))) return;
 
     const auditUserId = req.auth?.userId ?? null;
     const auditCron = Boolean(req.refreshDailyCron);
@@ -235,4 +233,4 @@ const {
 investmentsRouter.post("/instruments", postSingleInstrument);
 investmentsRouter.post("/instruments/bulk", postBulkInstruments);
 
-module.exports = { investmentsRouter };
+module.exports = { investmentsRouter, assertAdminUnlessCron };
