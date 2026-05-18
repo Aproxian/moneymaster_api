@@ -269,6 +269,30 @@ function sanitizeTwelveDataSymbol(sym) {
 }
 
 /**
+ * Non-US exchanges that look like ISO MICs (start with X + 3 uppercase chars) but must be
+ * sent as `exchange=` rather than `mic_code=` to Twelve Data.  The Twelve Data API only
+ * accepts `mic_code` for US venues (XNAS, XNYS, XASE, ARCX …); for international venues it
+ * ignores or misroutes `mic_code` and requires the plain `exchange` param.
+ */
+const INTL_MIC_STYLE_AS_EXCHANGE = new Set([
+  "XLON", // London Stock Exchange
+  "XETR", // Xetra (Frankfurt)
+  "XPAR", // Euronext Paris
+  "XAMS", // Euronext Amsterdam
+  "XBRU", // Euronext Brussels
+  "XMIL", // Borsa Italiana
+  "XMAD", // Bolsa de Madrid
+  "XTSE", // Toronto Stock Exchange
+  "XASX", // Australian Securities Exchange
+  "XHKG", // Hong Kong Stock Exchange
+  "XTKS", // Tokyo Stock Exchange
+  "XSHG", // Shanghai Stock Exchange
+  "XSHE", // Shenzhen Stock Exchange
+  "XBOM", // Bombay Stock Exchange
+  "XNSE", // National Stock Exchange of India
+]);
+
+/**
  * @param {string} exchangeRaw
  * @returns {{ exchange?: string, mic_code?: string }}
  */
@@ -277,12 +301,16 @@ function venueQueryParams(exchangeRaw) {
   if (!ex) return {};
   const up = ex.toUpperCase();
   if (PSEUDO_EXCHANGES.has(up)) return {};
-  // ISO MICs used in seed CSV (XLON, XETR, XPAR, XNAS, …) must use mic_code, not exchange.
+  // Known US exchanges: convert friendly name → ISO MIC that Twelve Data accepts.
+  const usMic = US_EXCHANGE_NAME_TO_MIC.get(up);
+  if (usMic) return { mic_code: usMic };
+  // International exchanges that are formatted like ISO MICs (XLON, XETR, …) but must be
+  // passed as `exchange=` to Twelve Data (mic_code is silently ignored for non-US venues).
+  if (INTL_MIC_STYLE_AS_EXCHANGE.has(up)) return { exchange: ex };
+  // Other 4-char X-prefixed tokens that are not in the override set: treat as mic_code.
   if (/^X[A-Z0-9]{3}$/.test(ex)) {
     return { mic_code: ex };
   }
-  const usMic = US_EXCHANGE_NAME_TO_MIC.get(up);
-  if (usMic) return { mic_code: usMic };
   return { exchange: ex };
 }
 
@@ -569,6 +597,14 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
 
   const result = {};
 
+  /**
+   * When true (passed from background sweep via skipBatchGap), we do exactly one HTTP call
+   * per tick — the unified no-venue batch. Any symbols not resolved by that call are left
+   * unresolved for this tick and will be retried next sweep cycle.  This guarantees the tick
+   * never burns more than CREDITS_PER_TICK credits regardless of venue-grouping complexity.
+   */
+  const strictOneCallPerTick = Boolean(options.strictOneCallPerTick);
+
   let toFetch = instruments;
   if (
     tryUnifiedSymbolOnlyFirst &&
@@ -589,7 +625,9 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
       }
     }
     toFetch = instruments.filter((i) => !result[i.id]);
-    if (!toFetch.length) {
+    if (!toFetch.length || strictOneCallPerTick) {
+      // strictOneCallPerTick: return after the single unified call regardless of gaps;
+      // venue retries are deferred to the next sweep cycle to keep credits predictable.
       return result;
     }
   }
@@ -610,7 +648,10 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
       try {
         bySym = await fetchTwelveDataTimeSeriesBatch(symbols, venue, {
           exchangeRawForRetry: list[0].exchange,
-          ...(chunk.length === 1 ? { maxVenueAttempts: 1 } : {}),
+          // Cap to 1 venue attempt for single-symbol chunks (avoids a second call for the
+          // same symbol after SINGLE_FALLBACK) AND when strictOneCallPerTick is set (sweep
+          // mode) so that no multi-symbol venue group ever retries with a different encoding.
+          ...(chunk.length === 1 || strictOneCallPerTick ? { maxVenueAttempts: 1 } : {}),
         });
       } catch (e) {
         if (e instanceof TwelveDataApiError && isTwelveDataRateLimitError(e)) {
@@ -811,7 +852,12 @@ async function refreshDailyQuotesForTwelveDataChunked(options = {}) {
   try {
     pricesByInstrumentId = await fetchTwelveDataPrices(slice, {
       skipBatchGap,
+      // In sweep mode (skipBatchGap=true) we do exactly one HTTP call per tick so that
+      // credit usage equals CREDITS_PER_TICK regardless of how many venue groups the
+      // slice spans.  Any symbols not resolved by the unified call are left for the next
+      // sweep cycle.  In non-sweep (manual chunk) mode the usual venue fallback chain runs.
       tryUnifiedSymbolOnlyFirst: true,
+      strictOneCallPerTick: skipBatchGap,
     });
   } catch (e) {
     if (e instanceof TwelveDataApiError) {

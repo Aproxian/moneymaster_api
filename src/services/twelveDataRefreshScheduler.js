@@ -59,6 +59,19 @@ let lastCompletedTick = null;
 let lastTwelveDataError = null;
 /** Non–Twelve-Data exception message from the last tick, if any. */
 let lastTickException = null;
+/**
+ * Epoch ms before which no API tick should fire after a 429 rate-limit response.
+ * Each consecutive 429 doubles the wait (65 s → 130 s → 260 s → 260 s …) so the
+ * Twelve Data rolling 60-second window has time to drain before we retry.
+ */
+let rateLimitCooldownUntil = 0;
+/** How many consecutive 429s we have seen without a successful tick in between. */
+let consecutive429Count = 0;
+
+/** Minimum pause after first 429 (must exceed Twelve Data's 60-second rolling window). */
+const RATE_LIMIT_BASE_COOLDOWN_MS = 65_000;
+/** Maximum pause between 429 retries (caps exponential back-off). */
+const RATE_LIMIT_MAX_COOLDOWN_MS = 260_000;
 
 function isLocalSweepRunnerActive() {
   return intervalId != null;
@@ -76,6 +89,8 @@ function clearLocalSweepIntervalAndMemory() {
   quotesCreatedThisSweep = 0;
   pendingFirstReset = false;
   sweepTotalInstruments = 0;
+  rateLimitCooldownUntil = 0;
+  consecutive429Count = 0;
 }
 
 async function clearPersistedSweepSession() {
@@ -348,6 +363,19 @@ async function startTwelveDataBackgroundSweep(options) {
       sweepLog("warn", "previous tick still running; skipping this interval");
       return;
     }
+
+    // Rate-limit cooldown: if the last tick returned 429, pause until the Twelve Data
+    // 60-second rolling window has had time to drain before retrying.
+    if (rateLimitCooldownUntil > 0 && Date.now() < rateLimitCooldownUntil) {
+      const remainingS = Math.ceil((rateLimitCooldownUntil - Date.now()) / 1000);
+      sweepLog("info", `rate-limit cooldown active — skipping tick (${remainingS}s remaining)`);
+      return;
+    }
+    if (rateLimitCooldownUntil > 0 && Date.now() >= rateLimitCooldownUntil) {
+      sweepLog("info", "rate-limit cooldown elapsed — resuming sweep");
+      rateLimitCooldownUntil = 0;
+    }
+
     sweepBusy = true;
     try {
       const resetCycle = pendingFirstReset;
@@ -384,9 +412,24 @@ async function startTwelveDataBackgroundSweep(options) {
       });
 
       if (result.twelveDataError) {
-        sweepLog("warn", "Twelve Data error (cursor not advanced)", result.twelveDataError);
+        if (result.twelveDataError.code === 429 || result.twelveDataError.code === "429") {
+          // Exponential back-off: 65 s → 130 s → 260 s (capped).
+          consecutive429Count += 1;
+          const cooldownMs = Math.min(
+            RATE_LIMIT_BASE_COOLDOWN_MS * Math.pow(2, consecutive429Count - 1),
+            RATE_LIMIT_MAX_COOLDOWN_MS
+          );
+          rateLimitCooldownUntil = Date.now() + cooldownMs;
+          sweepLog("warn", `rate-limit 429 — cooling down for ${Math.round(cooldownMs / 1000)}s (consecutive: ${consecutive429Count})`, result.twelveDataError);
+        } else {
+          sweepLog("warn", "Twelve Data error (cursor not advanced)", result.twelveDataError);
+        }
         return;
       }
+
+      // Successful tick — reset 429 counter.
+      consecutive429Count = 0;
+      rateLimitCooldownUntil = 0;
 
       if (result.cycleJustCompleted) {
         const quotesCreatedTotal = quotesCreatedThisSweep;
