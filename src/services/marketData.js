@@ -620,6 +620,9 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
         if (hit) result[inst.id] = hit;
       }
     } catch (e) {
+      if (strictOneCallPerTick) {
+        throw e;
+      }
       if (e instanceof TwelveDataApiError && isTwelveDataRateLimitError(e)) {
         throw e;
       }

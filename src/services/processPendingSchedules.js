@@ -40,6 +40,17 @@ async function processPendingSchedulesForUser(userId) {
         if (fresh.kind === "DELAY_ONCE") {
           const at = fresh.nextRunAt ?? fresh.executeAt;
           if (!at || at > now) return;
+          const claimed = await tx.pendingTransactionSchedule.updateMany({
+            where: {
+              id: fresh.id,
+              status: "PENDING",
+              cancelledAt: null,
+              nextRunAt: fresh.nextRunAt,
+            },
+            data: { lastRunAt: now },
+          });
+          if (claimed.count === 0) return;
+
           await materializeScheduledPayload(tx, {
             accountId: fresh.accountId,
             userId: fresh.createdByUserId,
@@ -57,16 +68,9 @@ async function processPendingSchedulesForUser(userId) {
         if (fresh.kind === "RECURRING") {
           if (!fresh.recurrenceUnit) return;
           let slot = new Date(fresh.nextRunAt);
-          let runs = 0;
-          while (slot <= now && runs < MAX_BURST) {
-            await materializeScheduledPayload(tx, {
-              accountId: fresh.accountId,
-              userId: fresh.createdByUserId,
-              occurredAt: new Date(slot),
-              payload: fresh.payload,
-              scheduleKind: fresh.kind,
-            });
-            runs += 1;
+          const runSlots = [];
+          while (slot <= now && runSlots.length < MAX_BURST) {
+            runSlots.push(new Date(slot));
             slot = advanceScheduleUtc(
               slot,
               fresh.recurrenceUnit,
@@ -74,13 +78,31 @@ async function processPendingSchedulesForUser(userId) {
               fresh.hourOfDay
             );
           }
-          await tx.pendingTransactionSchedule.update({
-            where: { id: fresh.id },
+          if (runSlots.length === 0) return;
+
+          const claimed = await tx.pendingTransactionSchedule.updateMany({
+            where: {
+              id: fresh.id,
+              status: "PENDING",
+              cancelledAt: null,
+              nextRunAt: fresh.nextRunAt,
+            },
             data: {
               nextRunAt: slot,
               lastRunAt: now,
             },
           });
+          if (claimed.count === 0) return;
+
+          for (const runSlot of runSlots) {
+            await materializeScheduledPayload(tx, {
+              accountId: fresh.accountId,
+              userId: fresh.createdByUserId,
+              occurredAt: runSlot,
+              payload: fresh.payload,
+              scheduleKind: fresh.kind,
+            });
+          }
         }
       });
     } catch (err) {
