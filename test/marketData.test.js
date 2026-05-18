@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const Module = require("node:module");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -18,14 +19,21 @@ function loadMarketDataWithFetch(fetchImpl) {
   const marketDataPath = path.resolve(__dirname, "../src/services/marketData.js");
   const prismaPath = path.resolve(__dirname, "../src/prisma.js");
   const fileLoggerPath = path.resolve(__dirname, "../src/lib/fileLogger.js");
-  const nodeFetchPath = require.resolve("node-fetch");
 
   delete require.cache[marketDataPath];
   stubModule(prismaPath, { prisma: {} });
   stubModule(fileLoggerPath, { logApp: () => {} });
-  stubModule(nodeFetchPath, fetchImpl);
 
-  return require(marketDataPath);
+  const originalLoad = Module._load;
+  Module._load = function load(request, parent, isMain) {
+    if (request === "node-fetch") return fetchImpl;
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    return require(marketDataPath);
+  } finally {
+    Module._load = originalLoad;
+  }
 }
 
 test("strict TwelveData sweep mode surfaces failed unified requests", async () => {
