@@ -37,6 +37,23 @@ async function processPendingSchedulesForUser(userId) {
         });
         if (!fresh) return;
 
+        const creatorStillMember = await tx.accountMember.findUnique({
+          where: {
+            userId_accountId: {
+              userId: fresh.createdByUserId,
+              accountId: fresh.accountId,
+            },
+          },
+          select: { userId: true },
+        });
+        if (!creatorStillMember) {
+          await tx.pendingTransactionSchedule.update({
+            where: { id: fresh.id },
+            data: { status: "CANCELLED", cancelledAt: now },
+          });
+          return;
+        }
+
         if (fresh.kind === "DELAY_ONCE") {
           const at = fresh.nextRunAt ?? fresh.executeAt;
           if (!at || at > now) return;
