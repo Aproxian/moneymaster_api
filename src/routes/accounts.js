@@ -372,8 +372,26 @@ accountsRouter.delete(
         select: { name: true },
       });
 
-      await prisma.accountMember.delete({
-        where: { userId_accountId: { userId: memberUserId, accountId } },
+      const now = new Date();
+      await prisma.$transaction(async (tx) => {
+        await tx.accountMember.delete({
+          where: { userId_accountId: { userId: memberUserId, accountId } },
+        });
+        await tx.categoryMemberAccess.deleteMany({
+          where: {
+            userId: memberUserId,
+            category: { accountId },
+          },
+        });
+        await tx.pendingTransactionSchedule.updateMany({
+          where: {
+            accountId,
+            createdByUserId: memberUserId,
+            status: "PENDING",
+            cancelledAt: null,
+          },
+          data: { status: "CANCELLED", cancelledAt: now },
+        });
       });
 
       await prisma.membershipNotice.create({
