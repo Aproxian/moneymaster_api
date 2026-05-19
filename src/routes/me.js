@@ -8,6 +8,12 @@ const { isAdminUserEmail } = require("../lib/adminUser");
 const { processPendingSchedulesForUser } = require("../services/processPendingSchedules");
 const { getMaintenanceState, setMaintenanceState } = require("../services/globalAppState");
 const { logApp } = require("../lib/fileLogger");
+const { syncNewMemberCategoryAccess } = require("../services/categoryMemberAccess");
+const {
+  MAX_ACCOUNTS_PER_USER,
+  ACCOUNT_LIMIT_REACHED_MESSAGE,
+  countActiveAccountMemberships,
+} = require("../lib/accountLimits");
 
 const meRouter = Router();
 
@@ -178,23 +184,131 @@ meRouter.post("/me/process-schedules", requireAuth, async (req, res, next) => {
 
 meRouter.get("/me/membership-notices", requireAuth, async (req, res, next) => {
   try {
-    const rows = await prisma.membershipNotice.findMany({
-      where: { userId: req.auth.userId },
-      orderBy: { createdAt: "asc" },
-      select: {
-        id: true,
-        kind: true,
-        accountId: true,
-        accountName: true,
-        createdAt: true,
-      },
-    });
+    const userId = req.auth.userId;
+    const [rows, invitations, accountMembershipCount] = await Promise.all([
+      prisma.membershipNotice.findMany({
+        where: { userId },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          kind: true,
+          accountId: true,
+          accountName: true,
+          createdAt: true,
+        },
+      }),
+      prisma.pendingAccountInvitation.findMany({
+        where: { invitedUserId: userId },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          accountId: true,
+          createdAt: true,
+          account: { select: { name: true } },
+          invitedBy: {
+            select: { id: true, email: true, displayName: true },
+          },
+        },
+      }),
+      countActiveAccountMemberships(prisma, userId),
+    ]);
+
     return res.json({
       notices: rows.map((r) => ({
         ...r,
         createdAt: r.createdAt.toISOString(),
       })),
+      invitations: invitations.map((i) => ({
+        id: i.id,
+        accountId: i.accountId,
+        accountName: i.account.name,
+        invitedBy: i.invitedBy,
+        createdAt: i.createdAt.toISOString(),
+      })),
+      accountMembershipCount,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+meRouter.post("/me/account-invitations/:invitationId/accept", requireAuth, async (req, res, next) => {
+  try {
+    const userId = req.auth.userId;
+    const { invitationId } = req.params;
+
+    const inv = await prisma.pendingAccountInvitation.findFirst({
+      where: { id: invitationId, invitedUserId: userId },
+      select: {
+        id: true,
+        accountId: true,
+        invitedUserId: true,
+      },
+    });
+    if (!inv) return res.status(404).json({ error: "Invitation not found" });
+
+    const account = await prisma.account.findFirst({
+      where: { id: inv.accountId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!account) {
+      await prisma.pendingAccountInvitation.delete({ where: { id: inv.id } });
+      return res.status(410).json({ error: "That account no longer exists" });
+    }
+
+    const already = await prisma.accountMember.findUnique({
+      where: { userId_accountId: { userId, accountId: inv.accountId } },
+    });
+    if (already) {
+      await prisma.pendingAccountInvitation.delete({ where: { id: inv.id } });
+      return res.status(409).json({ error: "You are already a member of this account" });
+    }
+
+    const membershipCount = await countActiveAccountMemberships(prisma, userId);
+    if (membershipCount >= MAX_ACCOUNTS_PER_USER) {
+      return res.status(403).json({
+        error: ACCOUNT_LIMIT_REACHED_MESSAGE,
+        code: "ACCOUNT_LIMIT_REACHED",
+      });
+    }
+
+    const created = await prisma.$transaction(async (tx) => {
+      await tx.pendingAccountInvitation.delete({ where: { id: inv.id } });
+      return tx.accountMember.create({
+        data: {
+          userId,
+          accountId: inv.accountId,
+          role: "MEMBER",
+        },
+        select: {
+          role: true,
+          joinedAt: true,
+          user: {
+            select: { id: true, email: true, displayName: true },
+          },
+        },
+      });
+    });
+
+    await syncNewMemberCategoryAccess(prisma, inv.accountId, userId);
+
+    return res.status(201).json({ member: created });
+  } catch (err) {
+    next(err);
+  }
+});
+
+meRouter.post("/me/account-invitations/:invitationId/decline", requireAuth, async (req, res, next) => {
+  try {
+    const userId = req.auth.userId;
+    const { invitationId } = req.params;
+
+    const del = await prisma.pendingAccountInvitation.deleteMany({
+      where: { id: invitationId, invitedUserId: userId },
+    });
+    if (del.count === 0) return res.status(404).json({ error: "Invitation not found" });
+
+    return res.status(204).send();
   } catch (err) {
     next(err);
   }

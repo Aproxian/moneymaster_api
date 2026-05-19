@@ -19,6 +19,12 @@ const {
   syncNewMemberCategoryAccess,
   sortMembersForLockUi,
 } = require("../services/categoryMemberAccess");
+const {
+  MAX_ACCOUNTS_PER_USER,
+  ACCOUNT_LIMIT_REACHED_MESSAGE,
+  INVITEE_AT_ACCOUNT_LIMIT_MESSAGE,
+  countActiveAccountMemberships,
+} = require("../lib/accountLimits");
 
 const accountsRouter = Router();
 
@@ -109,6 +115,10 @@ const addMemberSchema = z.object({
   userId: z.string().min(1).max(40),
 });
 
+const transferOwnershipSchema = z.object({
+  newOwnerUserId: z.string().min(1).max(40),
+});
+
 const changeCurrencySchema = z.object({
   newCurrency: z.string().min(1).max(10),
   // "1 oldCurrency = fxRate newCurrency"
@@ -186,6 +196,14 @@ accountsRouter.post("/", async (req, res, next) => {
     const currency = body.currency.trim().toUpperCase();
     const isBusiness = Boolean(body.isBusiness);
     const investingEnabled = body.investingEnabled ?? true;
+
+    const membershipCount = await countActiveAccountMemberships(prisma, userId);
+    if (membershipCount >= MAX_ACCOUNTS_PER_USER) {
+      return res.status(403).json({
+        error: ACCOUNT_LIMIT_REACHED_MESSAGE,
+        code: "ACCOUNT_LIMIT_REACHED",
+      });
+    }
 
     const account = await prisma.$transaction(async (tx) => {
       const created = await tx.account.create({
@@ -288,37 +306,45 @@ accountsRouter.post(
       });
       if (!target) return res.status(404).json({ error: "User not found" });
 
+      const inviteeMembershipCount = await countActiveAccountMemberships(prisma, body.userId);
+      if (inviteeMembershipCount >= MAX_ACCOUNTS_PER_USER) {
+        return res.status(409).json({
+          error: INVITEE_AT_ACCOUNT_LIMIT_MESSAGE,
+          code: "INVITEE_ACCOUNT_LIMIT",
+        });
+      }
+
       const existing = await prisma.accountMember.findUnique({
         where: { userId_accountId: { userId: body.userId, accountId } },
       });
       if (existing) return res.status(409).json({ error: "User is already a member" });
 
+      const pendingInvite = await prisma.pendingAccountInvitation.findUnique({
+        where: {
+          accountId_invitedUserId: { accountId, invitedUserId: body.userId },
+        },
+      });
+      if (pendingInvite) {
+        return res.status(409).json({ error: "An invitation is already pending for this user" });
+      }
+
       const accountBrief = await prisma.account.findFirst({
         where: { id: accountId, deletedAt: null },
         select: { name: true },
       });
+      if (!accountBrief) return res.status(404).json({ error: "Account not found" });
 
-      const created = await prisma.accountMember.create({
+      const invitation = await prisma.pendingAccountInvitation.create({
         data: {
-          userId: body.userId,
           accountId,
-          role: "MEMBER",
+          invitedUserId: body.userId,
+          invitedByUserId: userId,
         },
         select: {
-          role: true,
-          joinedAt: true,
-          user: {
-            select: { id: true, email: true, displayName: true },
-          },
-        },
-      });
-
-      await prisma.membershipNotice.create({
-        data: {
-          userId: body.userId,
-          kind: "ADDED",
-          accountId,
-          accountName: accountBrief?.name ?? null,
+          id: true,
+          accountId: true,
+          invitedUserId: true,
+          createdAt: true,
         },
       });
 
@@ -328,13 +354,19 @@ accountsRouter.post(
           action: "MEMBER_ADD",
           entity: "Account",
           entityId: accountId,
-          meta: { addedUserId: body.userId },
+          meta: { invitedUserId: body.userId, invitationId: invitation.id, pending: true },
         },
       });
 
-      await syncNewMemberCategoryAccess(prisma, accountId, body.userId);
-
-      return res.status(201).json({ member: created });
+      return res.status(201).json({
+        invitation: {
+          id: invitation.id,
+          accountId: invitation.accountId,
+          invitedUserId: invitation.invitedUserId,
+          createdAt: invitation.createdAt.toISOString(),
+        },
+        pending: true,
+      });
     } catch (err) {
       next(err);
     }
@@ -372,8 +404,16 @@ accountsRouter.delete(
         select: { name: true },
       });
 
-      await prisma.accountMember.delete({
-        where: { userId_accountId: { userId: memberUserId, accountId } },
+      await prisma.$transaction(async (tx) => {
+        await tx.categoryMemberAccess.deleteMany({
+          where: {
+            userId: memberUserId,
+            category: { accountId },
+          },
+        });
+        await tx.accountMember.delete({
+          where: { userId_accountId: { userId: memberUserId, accountId } },
+        });
       });
 
       await prisma.membershipNotice.create({
@@ -392,6 +432,146 @@ accountsRouter.delete(
           entity: "Account",
           entityId: accountId,
           meta: { removedUserId: memberUserId },
+        },
+      });
+
+      return res.status(204).send();
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * OWNER only: promote another member (ADMIN or MEMBER) to OWNER and become MEMBER.
+ */
+accountsRouter.post(
+  "/:accountId/transfer-ownership",
+  requireAccountMember("accountId"),
+  requireAccountRole("OWNER"),
+  async (req, res, next) => {
+    try {
+      const { accountId } = req.params;
+      const userId = req.auth.userId;
+      const body = transferOwnershipSchema.parse(req.body);
+
+      if (body.newOwnerUserId === userId) {
+        return res.status(400).json({ error: "Pick a different member to become owner" });
+      }
+
+      const accountBrief = await prisma.account.findFirst({
+        where: { id: accountId, deletedAt: null },
+        select: { name: true },
+      });
+      if (!accountBrief) return res.status(404).json({ error: "Account not found" });
+
+      const target = await prisma.accountMember.findUnique({
+        where: { userId_accountId: { userId: body.newOwnerUserId, accountId } },
+        select: { role: true },
+      });
+      if (!target) {
+        return res.status(404).json({ error: "That user is not a member of this account" });
+      }
+      if (target.role === "OWNER") {
+        return res.status(400).json({ error: "That member is already an owner" });
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.accountMember.update({
+          where: { userId_accountId: { userId, accountId } },
+          data: { role: "MEMBER" },
+        });
+        await tx.accountMember.update({
+          where: { userId_accountId: { userId: body.newOwnerUserId, accountId } },
+          data: { role: "OWNER" },
+        });
+      });
+
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: "UPDATE",
+          entity: "Account",
+          entityId: accountId,
+          meta: { transferOwnershipTo: body.newOwnerUserId },
+        },
+      });
+
+      const payload = await loadAccountDetail(prisma, accountId, userId, "MEMBER");
+      if (!payload) return res.status(404).json({ error: "Account not found" });
+      return res.json(payload);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * MEMBER or ADMIN may remove themselves from a shared account. OWNER must transfer ownership first.
+ */
+accountsRouter.post(
+  "/:accountId/leave",
+  requireAccountMember("accountId"),
+  async (req, res, next) => {
+    try {
+      const { accountId } = req.params;
+      const userId = req.auth.userId;
+
+      if (req.memberRole === "OWNER") {
+        return res.status(403).json({
+          error: "owner_cannot_leave",
+          message: "Transfer ownership to another member before leaving this account.",
+        });
+      }
+
+      const me = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { personalAccountId: true },
+      });
+      if (me?.personalAccountId === accountId) {
+        return res.status(400).json({ error: "You cannot leave your personal account" });
+      }
+
+      const memberRow = await prisma.accountMember.findUnique({
+        where: { userId_accountId: { userId, accountId } },
+      });
+      if (!memberRow) {
+        return res.status(404).json({ error: "Not a member of this account" });
+      }
+
+      const accountBrief = await prisma.account.findFirst({
+        where: { id: accountId },
+        select: { name: true },
+      });
+
+      await prisma.$transaction(async (tx) => {
+        await tx.categoryMemberAccess.deleteMany({
+          where: {
+            userId,
+            category: { accountId },
+          },
+        });
+        await tx.accountMember.delete({
+          where: { userId_accountId: { userId, accountId } },
+        });
+      });
+
+      await prisma.membershipNotice.create({
+        data: {
+          userId,
+          kind: "REMOVED",
+          accountId,
+          accountName: accountBrief?.name ?? null,
+        },
+      });
+
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: "MEMBER_REMOVE",
+          entity: "Account",
+          entityId: accountId,
+          meta: { leftVoluntarily: true },
         },
       });
 

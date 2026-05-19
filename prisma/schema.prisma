@@ -108,6 +108,8 @@ model User {
   currencyChanges     AccountCurrencyChange[] @relation("CurrencyChangedBy")
   schedulesCreated    PendingTransactionSchedule[] @relation("ScheduleCreatedBy")
   membershipNotices   MembershipNotice[]
+  sentAccountInvitations     PendingAccountInvitation[] @relation("AccountInviter")
+  receivedAccountInvitations PendingAccountInvitation[] @relation("AccountInvitee")
 
   @@index([deletedAt])
 }
@@ -174,9 +176,25 @@ model Account {
   transfersTo   TransferGroup[] @relation("ToAccount")
   userPersonalFor User[]          @relation("UserPersonalAccount")
   pendingSchedules PendingTransactionSchedule[]
+  pendingInvitations PendingAccountInvitation[]
 
   @@index([createdAt])
   @@index([deletedAt])
+}
+
+model PendingAccountInvitation {
+  id               String   @id @default(cuid())
+  accountId        String
+  invitedUserId    String
+  invitedByUserId  String
+  createdAt        DateTime @default(now())
+
+  account     Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  invitedUser User    @relation("AccountInvitee", fields: [invitedUserId], references: [id], onDelete: Cascade)
+  invitedBy   User    @relation("AccountInviter", fields: [invitedByUserId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, invitedUserId])
+  @@index([invitedUserId])
 }
 
 model PendingTransactionSchedule {

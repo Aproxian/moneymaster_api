@@ -663,6 +663,22 @@ categoriesRouter.delete("/:categoryId", async (req, res, next) => {
       return res.status(404).json({ error: "Category not found" });
     }
 
+    const activeTxCount = await prisma.transaction.count({
+      where: {
+        accountId,
+        categoryId,
+        revokedAt: null,
+      },
+    });
+    if (activeTxCount > 0) {
+      return res.status(409).json({
+        error: "category_has_non_revoked_transactions",
+        message:
+          "Revoke every transaction that still uses this category before deleting it. Revoked rows remain in history but no longer block removal.",
+        nonRevokedTransactionCount: activeTxCount,
+      });
+    }
+
     await prisma.category.update({
       where: { id: categoryId },
       data: { deletedAt: new Date() },
