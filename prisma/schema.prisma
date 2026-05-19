@@ -49,6 +49,7 @@ enum MarketDataProvider {
   FINNHUB
   POLYGON
   ALPHAVANTAGE
+  YAHOOFINANCE
   OTHER
 }
 
