@@ -8,6 +8,9 @@ const {
   postBulkInstruments,
 } = require("../services/instrumentAdminImport");
 
+const ACTIVE_QUOTE_PROVIDER =
+  (process.env.QUOTE_ACTIVE_PROVIDER ?? "TWELVEDATA").trim().toUpperCase();
+
 const instrumentsRouter = Router();
 
 instrumentsRouter.use(requireAuth);
@@ -49,6 +52,7 @@ instrumentsRouter.get("/", async (req, res, next) => {
           country
         FROM Instrument
         WHERE isActive = 1
+          AND provider = ${ACTIVE_QUOTE_PROVIDER}
           AND (
             LOWER(providerSymbol) LIKE LOWER(${pattern})
             OR LOWER(name) LIKE LOWER(${pattern})
@@ -58,7 +62,7 @@ instrumentsRouter.get("/", async (req, res, next) => {
       `;
     } else {
       instruments = await prisma.instrument.findMany({
-        where: { isActive: true },
+        where: { isActive: true, provider: ACTIVE_QUOTE_PROVIDER },
         select: {
           id: true,
           provider: true,
