@@ -9,6 +9,7 @@ const { seedDefaultCategories } = require("../services/seedDefaultCategories");
 const {
   accountIsPersonalForUser,
   canConfigureCategoryMemberAccess,
+  canToggleCategoryManualLock,
   computeManualEntryAllowedForMe,
   getCategoryMemberAccessState,
   getPrimaryOwnerUserId,
@@ -576,6 +577,8 @@ categoriesRouter.patch("/:categoryId", async (req, res, next) => {
         type: true,
         name: true,
         internalKey: true,
+        lockedForManualEntry: true,
+        createdByUserId: true,
       },
     });
 
@@ -605,6 +608,23 @@ categoriesRouter.patch("/:categoryId", async (req, res, next) => {
       return res.status(400).json({
         error: "System categories cannot change manual-entry lock",
       });
+    }
+
+    if (body.lockedForManualEntry !== undefined) {
+      const isPersonal = await accountIsPersonalForUser(prisma, userId, accountId);
+      const primaryOwnerUserId = isPersonal
+        ? null
+        : await getPrimaryOwnerUserId(prisma, accountId);
+      if (
+        !canToggleCategoryManualLock({
+          isPersonal,
+          category: existing,
+          primaryOwnerUserId,
+          userId,
+        })
+      ) {
+        return res.status(403).json({ error: "You cannot change this category lock" });
+      }
     }
 
     const updated = await prisma.category.update({

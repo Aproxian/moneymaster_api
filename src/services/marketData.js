@@ -125,42 +125,6 @@ function autoDeactivatePlanRestrictedSymbolsEnabled() {
   return !String(process.env.TWELVEDATA_AUTO_DEACTIVATE_PLAN_SYMBOLS ?? "1").match(/^(0|false|off)$/i);
 }
 
-/**
- * @param {Set<string> | string[]} tickerUppers sanitized upper tickers (e.g. TTM)
- */
-async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
-  if (!autoDeactivatePlanRestrictedSymbolsEnabled()) return;
-  const want = new Set(
-    [...tickerUppers].map((t) => String(t).toUpperCase()).filter(Boolean)
-  );
-  if (want.size === 0) return;
-  try {
-    const rows = await prisma.instrument.findMany({
-      where: { provider: "TWELVEDATA", isActive: true },
-      select: { id: true, providerSymbol: true },
-    });
-    const ids = rows
-      .filter((r) => want.has(sanitizeTwelveDataSymbol(r.providerSymbol).toUpperCase()))
-      .map((r) => r.id);
-    if (ids.length === 0) return;
-    const res = await prisma.instrument.updateMany({
-      where: { id: { in: ids } },
-      data: { isActive: false },
-    });
-    logApp("WARN", "TwelveData", "auto_deactivated_plan_restricted_symbols", {
-      tickers: [...want],
-      rowsUpdated: res.count,
-    });
-  } catch (e) {
-    logApp(
-      "ERROR",
-      "TwelveData",
-      "auto_deactivate_plan_restricted_failed",
-      e instanceof Error ? e.message : String(e)
-    );
-  }
-}
-
 async function deactivateTwelveDataInstrumentById(instrumentId) {
   if (!autoDeactivatePlanRestrictedSymbolsEnabled() || !instrumentId) return;
   try {
@@ -220,7 +184,10 @@ function extractPlanRestrictedTickerUppersFromTimeSeriesPayload(data) {
 async function handleTwelveDataJsonBeforeThrow(data, keysUpperSingleSymbolBatch) {
   const tierSyms = extractPlanRestrictedTickerUppersFromTimeSeriesPayload(data);
   if (tierSyms.size > 0) {
-    await deactivateTwelveDataInstrumentsByTickerUppers(tierSyms);
+    logApp("WARN", "TwelveData", "plan_restricted_batch_symbols", {
+      tickers: [...tierSyms],
+      note: "not auto-deactivating batch symbols because providerSymbol is not unique across exchanges",
+    });
   }
   if (
     data?.status === "error" &&
@@ -228,7 +195,10 @@ async function handleTwelveDataJsonBeforeThrow(data, keysUpperSingleSymbolBatch)
     isTwelveDataPlanTierRestriction(data.code, data.message) &&
     keysUpperSingleSymbolBatch.length === 1
   ) {
-    await deactivateTwelveDataInstrumentsByTickerUppers(new Set(keysUpperSingleSymbolBatch));
+    logApp("WARN", "TwelveData", "plan_restricted_batch_symbol", {
+      ticker: keysUpperSingleSymbolBatch[0],
+      note: "exact instrument id is required before auto-deactivation",
+    });
   }
 }
 
@@ -620,6 +590,9 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
         if (hit) result[inst.id] = hit;
       }
     } catch (e) {
+      if (strictOneCallPerTick) {
+        throw e;
+      }
       if (e instanceof TwelveDataApiError && isTwelveDataRateLimitError(e)) {
         throw e;
       }
