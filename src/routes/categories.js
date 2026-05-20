@@ -671,10 +671,12 @@ categoriesRouter.delete("/:categoryId", async (req, res, next) => {
       },
     });
     if (activeTxCount > 0) {
+      const noun = activeTxCount === 1 ? "transaction" : "transactions";
+      const human = `This category still has ${activeTxCount} active ${noun}. Revoke them or change their category first; then you can delete this category. (Revoked items stay in history.)`;
       return res.status(409).json({
-        error: "category_has_non_revoked_transactions",
-        message:
-          "Revoke every transaction that still uses this category before deleting it. Revoked rows remain in history but no longer block removal.",
+        code: "category_has_non_revoked_transactions",
+        error: human,
+        message: human,
         nonRevokedTransactionCount: activeTxCount,
       });
     }
