@@ -23,7 +23,7 @@ async function assertAdmin(req, res) {
 }
 
 const createInstrumentSchema = z.object({
-  provider: z.enum(["TWELVEDATA", "FINNHUB", "POLYGON", "ALPHAVANTAGE", "OTHER"]),
+  provider: z.enum(["TWELVEDATA", "FINNHUB", "POLYGON", "ALPHAVANTAGE", "YAHOOFINANCE", "OTHER"]),
   providerSymbol: z.string().min(1).max(100),
   name: z.string().min(1).max(255),
   type: z.enum([
