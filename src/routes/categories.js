@@ -6,6 +6,7 @@ const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { seedDefaultCategories } = require("../services/seedDefaultCategories");
+const { countPendingSchedulesForCategory } = require("../lib/schedulePayloads");
 const {
   accountIsPersonalForUser,
   canConfigureCategoryMemberAccess,
@@ -678,6 +679,22 @@ categoriesRouter.delete("/:categoryId", async (req, res, next) => {
         error: human,
         message: human,
         nonRevokedTransactionCount: activeTxCount,
+      });
+    }
+
+    const pendingScheduleCount = await countPendingSchedulesForCategory(
+      prisma,
+      accountId,
+      categoryId
+    );
+    if (pendingScheduleCount > 0) {
+      const noun = pendingScheduleCount === 1 ? "schedule" : "schedules";
+      const human = `This category is still used by ${pendingScheduleCount} pending ${noun}. Cancel those scheduled entries first; then you can delete this category.`;
+      return res.status(409).json({
+        code: "category_has_pending_schedules",
+        error: human,
+        message: human,
+        pendingScheduleCount,
       });
     }
 

@@ -10,9 +10,9 @@ const { getMaintenanceState, setMaintenanceState } = require("../services/global
 const { logApp } = require("../lib/fileLogger");
 const { syncNewMemberCategoryAccess } = require("../services/categoryMemberAccess");
 const {
-  MAX_ACCOUNTS_PER_USER,
-  ACCOUNT_LIMIT_REACHED_MESSAGE,
+  assertCanAddActiveAccountMembership,
   countActiveAccountMemberships,
+  isAccountLimitError,
 } = require("../lib/accountLimits");
 
 const meRouter = Router();
@@ -264,31 +264,35 @@ meRouter.post("/me/account-invitations/:invitationId/accept", requireAuth, async
       return res.status(409).json({ error: "You are already a member of this account" });
     }
 
-    const membershipCount = await countActiveAccountMemberships(prisma, userId);
-    if (membershipCount >= MAX_ACCOUNTS_PER_USER) {
-      return res.status(403).json({
-        error: ACCOUNT_LIMIT_REACHED_MESSAGE,
-        code: "ACCOUNT_LIMIT_REACHED",
-      });
-    }
-
-    const created = await prisma.$transaction(async (tx) => {
-      await tx.pendingAccountInvitation.delete({ where: { id: inv.id } });
-      return tx.accountMember.create({
-        data: {
-          userId,
-          accountId: inv.accountId,
-          role: "MEMBER",
-        },
-        select: {
-          role: true,
-          joinedAt: true,
-          user: {
-            select: { id: true, email: true, displayName: true },
+    let created;
+    try {
+      created = await prisma.$transaction(async (tx) => {
+        await assertCanAddActiveAccountMembership(tx, userId);
+        await tx.pendingAccountInvitation.delete({ where: { id: inv.id } });
+        return tx.accountMember.create({
+          data: {
+            userId,
+            accountId: inv.accountId,
+            role: "MEMBER",
           },
-        },
+          select: {
+            role: true,
+            joinedAt: true,
+            user: {
+              select: { id: true, email: true, displayName: true },
+            },
+          },
+        });
       });
-    });
+    } catch (err) {
+      if (isAccountLimitError(err)) {
+        return res.status(err.statusCode).json({
+          error: err.message,
+          code: err.code,
+        });
+      }
+      throw err;
+    }
 
     await syncNewMemberCategoryAccess(prisma, inv.accountId, userId);
 
