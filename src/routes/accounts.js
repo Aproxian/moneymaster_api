@@ -21,9 +21,10 @@ const {
 } = require("../services/categoryMemberAccess");
 const {
   MAX_ACCOUNTS_PER_USER,
-  ACCOUNT_LIMIT_REACHED_MESSAGE,
   INVITEE_AT_ACCOUNT_LIMIT_MESSAGE,
+  assertCanAddActiveAccountMembership,
   countActiveAccountMemberships,
+  isAccountLimitError,
 } = require("../lib/accountLimits");
 
 const accountsRouter = Router();
@@ -197,50 +198,55 @@ accountsRouter.post("/", async (req, res, next) => {
     const isBusiness = Boolean(body.isBusiness);
     const investingEnabled = body.investingEnabled ?? true;
 
-    const membershipCount = await countActiveAccountMemberships(prisma, userId);
-    if (membershipCount >= MAX_ACCOUNTS_PER_USER) {
-      return res.status(403).json({
-        error: ACCOUNT_LIMIT_REACHED_MESSAGE,
-        code: "ACCOUNT_LIMIT_REACHED",
-      });
-    }
+    let account;
+    try {
+      account = await prisma.$transaction(async (tx) => {
+        await assertCanAddActiveAccountMembership(tx, userId);
 
-    const account = await prisma.$transaction(async (tx) => {
-      const created = await tx.account.create({
-        data: {
-          name: body.name.trim(),
-          currency,
-          investingEnabled,
-          isBusiness,
-          companyName: isBusiness ? body.companyName?.trim() || null : null,
-          companyLegalName: isBusiness ? body.companyLegalName?.trim() || null : null,
-          companyTaxId: isBusiness ? body.companyTaxId?.trim() || null : null,
-          companyAddress: isBusiness ? body.companyAddress?.trim() || null : null,
-          companyNotes: isBusiness ? body.companyNotes?.trim() || null : null,
-          members: {
-            create: {
-              userId,
-              role: "OWNER",
+        const created = await tx.account.create({
+          data: {
+            name: body.name.trim(),
+            currency,
+            investingEnabled,
+            isBusiness,
+            companyName: isBusiness ? body.companyName?.trim() || null : null,
+            companyLegalName: isBusiness ? body.companyLegalName?.trim() || null : null,
+            companyTaxId: isBusiness ? body.companyTaxId?.trim() || null : null,
+            companyAddress: isBusiness ? body.companyAddress?.trim() || null : null,
+            companyNotes: isBusiness ? body.companyNotes?.trim() || null : null,
+            members: {
+              create: {
+                userId,
+                role: "OWNER",
+              },
             },
           },
-        },
-        select: {
-          id: true,
-          name: true,
-          currency: true,
-          investingEnabled: true,
-          isBusiness: true,
-          companyName: true,
-          companyLegalName: true,
-          companyTaxId: true,
-          companyAddress: true,
-          companyNotes: true,
-          createdAt: true,
-        },
+          select: {
+            id: true,
+            name: true,
+            currency: true,
+            investingEnabled: true,
+            isBusiness: true,
+            companyName: true,
+            companyLegalName: true,
+            companyTaxId: true,
+            companyAddress: true,
+            companyNotes: true,
+            createdAt: true,
+          },
+        });
+        await seedDefaultCategories(tx, created.id, { investingEnabled, createdByUserId: userId });
+        return created;
       });
-      await seedDefaultCategories(tx, created.id, { investingEnabled, createdByUserId: userId });
-      return created;
-    });
+    } catch (err) {
+      if (isAccountLimitError(err)) {
+        return res.status(err.statusCode).json({
+          error: err.message,
+          code: err.code,
+        });
+      }
+      throw err;
+    }
 
     return res.status(201).json({ account });
   } catch (err) {
