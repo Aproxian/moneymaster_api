@@ -1,0 +1,6 @@
+-- Add Yahoo Finance to provider enums used by instruments and quote cache rows.
+ALTER TABLE `Instrument`
+  MODIFY `provider` ENUM('TWELVEDATA', 'FINNHUB', 'POLYGON', 'ALPHAVANTAGE', 'YAHOOFINANCE', 'OTHER') NOT NULL;
+
+ALTER TABLE `QuoteCache`
+  MODIFY `provider` ENUM('TWELVEDATA', 'FINNHUB', 'POLYGON', 'ALPHAVANTAGE', 'YAHOOFINANCE', 'OTHER') NOT NULL;

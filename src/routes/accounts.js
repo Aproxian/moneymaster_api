@@ -28,6 +28,13 @@ const {
 
 const accountsRouter = Router();
 
+class OwnershipTransferConflictError extends Error {
+  constructor() {
+    super("Ownership changed while transferring account ownership");
+    this.name = "OwnershipTransferConflictError";
+  }
+}
+
 /**
  * @param {import('@prisma/client').PrismaClient} prismaClient
  * @param {string} accountId
@@ -477,14 +484,21 @@ accountsRouter.post(
       }
 
       await prisma.$transaction(async (tx) => {
-        await tx.accountMember.update({
-          where: { userId_accountId: { userId, accountId } },
+        const demoted = await tx.accountMember.updateMany({
+          where: { userId, accountId, role: "OWNER" },
           data: { role: "MEMBER" },
         });
-        await tx.accountMember.update({
-          where: { userId_accountId: { userId: body.newOwnerUserId, accountId } },
+        if (demoted.count !== 1) {
+          throw new OwnershipTransferConflictError();
+        }
+
+        const promoted = await tx.accountMember.updateMany({
+          where: { userId: body.newOwnerUserId, accountId, role: { not: "OWNER" } },
           data: { role: "OWNER" },
         });
+        if (promoted.count !== 1) {
+          throw new OwnershipTransferConflictError();
+        }
       });
 
       await prisma.auditLog.create({
@@ -501,6 +515,12 @@ accountsRouter.post(
       if (!payload) return res.status(404).json({ error: "Account not found" });
       return res.json(payload);
     } catch (err) {
+      if (err instanceof OwnershipTransferConflictError) {
+        return res.status(409).json({
+          error: "ownership_transfer_conflict",
+          message: "Account ownership changed while processing this request. Refresh and try again.",
+        });
+      }
       next(err);
     }
   }

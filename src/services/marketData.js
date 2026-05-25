@@ -125,42 +125,6 @@ function autoDeactivatePlanRestrictedSymbolsEnabled() {
   return !String(process.env.TWELVEDATA_AUTO_DEACTIVATE_PLAN_SYMBOLS ?? "1").match(/^(0|false|off)$/i);
 }
 
-/**
- * @param {Set<string> | string[]} tickerUppers sanitized upper tickers (e.g. TTM)
- */
-async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
-  if (!autoDeactivatePlanRestrictedSymbolsEnabled()) return;
-  const want = new Set(
-    [...tickerUppers].map((t) => String(t).toUpperCase()).filter(Boolean)
-  );
-  if (want.size === 0) return;
-  try {
-    const rows = await prisma.instrument.findMany({
-      where: { provider: "TWELVEDATA", isActive: true },
-      select: { id: true, providerSymbol: true },
-    });
-    const ids = rows
-      .filter((r) => want.has(sanitizeTwelveDataSymbol(r.providerSymbol).toUpperCase()))
-      .map((r) => r.id);
-    if (ids.length === 0) return;
-    const res = await prisma.instrument.updateMany({
-      where: { id: { in: ids } },
-      data: { isActive: false },
-    });
-    logApp("WARN", "TwelveData", "auto_deactivated_plan_restricted_symbols", {
-      tickers: [...want],
-      rowsUpdated: res.count,
-    });
-  } catch (e) {
-    logApp(
-      "ERROR",
-      "TwelveData",
-      "auto_deactivate_plan_restricted_failed",
-      e instanceof Error ? e.message : String(e)
-    );
-  }
-}
-
 async function deactivateTwelveDataInstrumentById(instrumentId) {
   if (!autoDeactivatePlanRestrictedSymbolsEnabled() || !instrumentId) return;
   try {
@@ -186,7 +150,7 @@ async function deactivateTwelveDataInstrumentById(instrumentId) {
 /**
  * Per-symbol plan errors inside a multi-symbol `time_series` body (global `status` may still be ok).
  * @param {unknown} data
- * @returns {Set<string>} upper tickers to deactivate
+ * @returns {Set<string>} upper tickers reported as plan-restricted
  */
 function extractPlanRestrictedTickerUppersFromTimeSeriesPayload(data) {
   const out = new Set();
@@ -220,7 +184,9 @@ function extractPlanRestrictedTickerUppersFromTimeSeriesPayload(data) {
 async function handleTwelveDataJsonBeforeThrow(data, keysUpperSingleSymbolBatch) {
   const tierSyms = extractPlanRestrictedTickerUppersFromTimeSeriesPayload(data);
   if (tierSyms.size > 0) {
-    await deactivateTwelveDataInstrumentsByTickerUppers(tierSyms);
+    logApp("WARN", "TwelveData", "plan_restricted_symbols_in_batch", {
+      tickers: [...tierSyms],
+    });
   }
   if (
     data?.status === "error" &&
@@ -228,7 +194,9 @@ async function handleTwelveDataJsonBeforeThrow(data, keysUpperSingleSymbolBatch)
     isTwelveDataPlanTierRestriction(data.code, data.message) &&
     keysUpperSingleSymbolBatch.length === 1
   ) {
-    await deactivateTwelveDataInstrumentsByTickerUppers(new Set(keysUpperSingleSymbolBatch));
+    logApp("WARN", "TwelveData", "plan_restricted_single_symbol_response", {
+      ticker: keysUpperSingleSymbolBatch[0],
+    });
   }
 }
 
