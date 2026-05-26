@@ -10,8 +10,9 @@ const {
 } = require("../lib/investmentsRefreshCron");
 
 /**
- * Auth for POST /investments/refresh-daily only: either valid cron header + secret (+ optional IP allowlist)
- * or normal Bearer JWT (same rules as requireAuth).
+ * Auth for POST /investments/refresh-daily, POST /investments/refresh-daily-yahoo,
+ * POST /investments/quote-cache/trim, and related sweep status routes: either valid cron header + secret
+ * (+ optional IP allowlist) or normal Bearer JWT (same rules as requireAuth).
  * Sets req.auth = { userId } (userId null for cron) and req.refreshDailyCron = true when cron.
  * @type {import('express').RequestHandler}
  */

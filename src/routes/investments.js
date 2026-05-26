@@ -418,6 +418,89 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
   }
 });
 
+/**
+ * Trim `QuoteCache` to the newest N rows (by createdAt, then asOf, then id).
+ * Auth: same as POST /investments/refresh-daily (cron header + secret or admin JWT).
+ *
+ * Query or JSON body: `keepMostRecentCount` (optional). When omitted, defaults to the number of rows
+ * in `Instrument` (total instrument count).
+ */
+investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, next) => {
+  try {
+    const adminEmail = process.env.ADMIN_EMAIL?.trim();
+    if (!req.refreshDailyCron && adminEmail) {
+      const user = await assertAdmin(req, res);
+      if (!user) return;
+    }
+
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const raw =
+      req.query?.keepMostRecentCount ??
+      req.query?.keep_most_recent_count ??
+      body.keepMostRecentCount ??
+      body.keep_most_recent_count;
+
+    let keepMostRecentCount;
+    if (raw === undefined || raw === null || raw === "") {
+      keepMostRecentCount = await prisma.instrument.count();
+    } else {
+      const n = parseInt(String(raw), 10);
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({
+          error: "keepMostRecentCount must be a non-negative integer",
+        });
+      }
+      keepMostRecentCount = n;
+    }
+
+    const rowsBefore = await prisma.quoteCache.count();
+
+    if (keepMostRecentCount === 0) {
+      const del = await prisma.quoteCache.deleteMany({});
+      return res.json({
+        ok: true,
+        keepMostRecentCount: 0,
+        rowsBefore,
+        rowsDeleted: del.count,
+        rowsAfter: 0,
+      });
+    }
+
+    if (rowsBefore <= keepMostRecentCount) {
+      return res.json({
+        ok: true,
+        keepMostRecentCount,
+        rowsBefore,
+        rowsDeleted: 0,
+        rowsAfter: rowsBefore,
+      });
+    }
+
+    await prisma.$executeRaw`
+      DELETE q FROM QuoteCache q
+      LEFT JOIN (
+        SELECT id FROM (
+          SELECT id FROM QuoteCache ORDER BY createdAt DESC, asOf DESC, id DESC LIMIT ${keepMostRecentCount}
+        ) inner_keep
+      ) k ON q.id = k.id
+      WHERE k.id IS NULL
+    `;
+
+    const rowsAfter = await prisma.quoteCache.count();
+    const rowsDeleted = rowsBefore - rowsAfter;
+
+    return res.json({
+      ok: true,
+      keepMostRecentCount,
+      rowsBefore,
+      rowsDeleted,
+      rowsAfter,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 investmentsRouter.use(requireAuth);
 
 const {
