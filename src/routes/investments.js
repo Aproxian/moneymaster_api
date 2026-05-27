@@ -65,6 +65,91 @@ async function assertAdmin(req, res) {
   return user;
 }
 
+async function authorizeQuoteCacheTrimRequest(req, res) {
+  if (req.refreshDailyCron) return true;
+  const user = await assertAdmin(req, res);
+  return Boolean(user);
+}
+
+function parseQuoteCacheTrimKeepCount(raw) {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const text = String(raw).trim();
+  if (!/^\d+$/.test(text)) {
+    return null;
+  }
+  const n = Number(text);
+  if (!Number.isSafeInteger(n)) {
+    return null;
+  }
+  return n;
+}
+
+async function trimQuoteCacheRows(keepMostRecentCount, db = prisma) {
+  const rowsBefore = await db.quoteCache.count();
+
+  if (keepMostRecentCount === 0) {
+    const del = await db.quoteCache.deleteMany({});
+    return {
+      ok: true,
+      keepMostRecentCount: 0,
+      keepLatestPerInstrument: false,
+      rowsBefore,
+      rowsDeleted: del.count,
+      rowsAfter: 0,
+    };
+  }
+
+  if (rowsBefore <= keepMostRecentCount) {
+    return {
+      ok: true,
+      keepMostRecentCount,
+      keepLatestPerInstrument: true,
+      rowsBefore,
+      rowsDeleted: 0,
+      rowsAfter: rowsBefore,
+    };
+  }
+
+  await db.$executeRaw`
+    DELETE q FROM QuoteCache q
+    LEFT JOIN (
+      SELECT id FROM (
+        SELECT per_instrument.id
+        FROM QuoteCache per_instrument
+        LEFT JOIN QuoteCache newer
+          ON newer.instrumentId = per_instrument.instrumentId
+         AND (
+           newer.asOf > per_instrument.asOf
+           OR (newer.asOf = per_instrument.asOf AND newer.createdAt > per_instrument.createdAt)
+           OR (
+             newer.asOf = per_instrument.asOf
+             AND newer.createdAt = per_instrument.createdAt
+             AND newer.id > per_instrument.id
+           )
+         )
+        WHERE newer.id IS NULL
+        UNION
+        SELECT id FROM (
+          SELECT id FROM QuoteCache ORDER BY createdAt DESC, asOf DESC, id DESC LIMIT ${keepMostRecentCount}
+        ) global_keep
+      ) keep_rows
+    ) k ON q.id = k.id
+    WHERE k.id IS NULL
+  `;
+
+  const rowsAfter = await db.quoteCache.count();
+  const rowsDeleted = rowsBefore - rowsAfter;
+
+  return {
+    ok: true,
+    keepMostRecentCount,
+    keepLatestPerInstrument: true,
+    rowsBefore,
+    rowsDeleted,
+    rowsAfter,
+  };
+}
+
 /** Cron requests must not run arbitrary chunk refresh (credit burn); only sweep control. */
 function rejectCronNonSweepBody(req, res, backgroundSweep, cancelBackgroundSweep) {
   if (!req.refreshDailyCron) return false;
@@ -419,19 +504,17 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
 });
 
 /**
- * Trim `QuoteCache` to the newest N rows (by createdAt, then asOf, then id).
+ * Trim `QuoteCache` while always preserving the latest quote for each instrument.
  * Auth: same as POST /investments/refresh-daily (cron header + secret or admin JWT).
  *
  * Query or JSON body: `keepMostRecentCount` (optional). When omitted, defaults to the number of rows
- * in `Instrument` (total instrument count).
+ * in `Instrument` (total instrument count). The newest N rows are kept in addition to each
+ * instrument's latest quote so a partial sweep cannot erase all quotes for untouched instruments.
  */
 investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
-      const user = await assertAdmin(req, res);
-      if (!user) return;
-    }
+    const authorized = await authorizeQuoteCacheTrimRequest(req, res);
+    if (!authorized) return;
 
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const raw =
@@ -440,62 +523,19 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
       body.keepMostRecentCount ??
       body.keep_most_recent_count;
 
-    let keepMostRecentCount;
-    if (raw === undefined || raw === null || raw === "") {
+    const parsedKeepCount = parseQuoteCacheTrimKeepCount(raw);
+    if (parsedKeepCount === null) {
+      return res.status(400).json({
+        error: "keepMostRecentCount must be a non-negative integer",
+      });
+    }
+
+    let keepMostRecentCount = parsedKeepCount;
+    if (keepMostRecentCount === undefined) {
       keepMostRecentCount = await prisma.instrument.count();
-    } else {
-      const n = parseInt(String(raw), 10);
-      if (!Number.isFinite(n) || n < 0) {
-        return res.status(400).json({
-          error: "keepMostRecentCount must be a non-negative integer",
-        });
-      }
-      keepMostRecentCount = n;
     }
 
-    const rowsBefore = await prisma.quoteCache.count();
-
-    if (keepMostRecentCount === 0) {
-      const del = await prisma.quoteCache.deleteMany({});
-      return res.json({
-        ok: true,
-        keepMostRecentCount: 0,
-        rowsBefore,
-        rowsDeleted: del.count,
-        rowsAfter: 0,
-      });
-    }
-
-    if (rowsBefore <= keepMostRecentCount) {
-      return res.json({
-        ok: true,
-        keepMostRecentCount,
-        rowsBefore,
-        rowsDeleted: 0,
-        rowsAfter: rowsBefore,
-      });
-    }
-
-    await prisma.$executeRaw`
-      DELETE q FROM QuoteCache q
-      LEFT JOIN (
-        SELECT id FROM (
-          SELECT id FROM QuoteCache ORDER BY createdAt DESC, asOf DESC, id DESC LIMIT ${keepMostRecentCount}
-        ) inner_keep
-      ) k ON q.id = k.id
-      WHERE k.id IS NULL
-    `;
-
-    const rowsAfter = await prisma.quoteCache.count();
-    const rowsDeleted = rowsBefore - rowsAfter;
-
-    return res.json({
-      ok: true,
-      keepMostRecentCount,
-      rowsBefore,
-      rowsDeleted,
-      rowsAfter,
-    });
+    return res.json(await trimQuoteCacheRows(keepMostRecentCount));
   } catch (err) {
     next(err);
   }
@@ -511,4 +551,11 @@ const {
 investmentsRouter.post("/instruments", postSingleInstrument);
 investmentsRouter.post("/instruments/bulk", postBulkInstruments);
 
-module.exports = { investmentsRouter };
+module.exports = {
+  investmentsRouter,
+  __private: {
+    authorizeQuoteCacheTrimRequest,
+    parseQuoteCacheTrimKeepCount,
+    trimQuoteCacheRows,
+  },
+};
