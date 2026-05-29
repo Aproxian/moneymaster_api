@@ -5,6 +5,7 @@ const { calendarDateInSweepTimezone } = require("../lib/investmentsRefreshCron")
 const {
   refreshDailyQuotesForYahooFinanceChunked,
   getYahooFinanceSymbolsPerTick,
+  getYahooFinanceRequestTimeoutMs,
 } = require("./yahooFinanceData");
 const { logApp } = require("../lib/fileLogger");
 
@@ -34,7 +35,9 @@ const SWEEP_INTERVAL_MS = Math.max(
 
 /** If `backgroundSweepLastTickAt` is older than this, the session is treated as stale. */
 function getSweepHeartbeatStaleMs() {
-  return Math.max(SWEEP_INTERVAL_MS * 4, 60_000);
+  const worstCaseTickMs =
+    getYahooFinanceSymbolsPerTick() * getYahooFinanceRequestTimeoutMs() + SWEEP_INTERVAL_MS;
+  return Math.max(SWEEP_INTERVAL_MS * 4, worstCaseTickMs * 2, 60_000);
 }
 
 /** @type {ReturnType<typeof setInterval> | null} */
