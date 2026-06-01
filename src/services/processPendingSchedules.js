@@ -1,9 +1,31 @@
 const { prisma } = require("../prisma");
 const { logApp } = require("../lib/fileLogger");
+const { isAdminUserEmail } = require("../lib/adminUser");
+const {
+  hasActivePremium,
+  isPremiumEnforcementEnabled,
+} = require("../middleware/requirePremium");
 const { advanceScheduleUtc } = require("./advanceRecurrence");
 const { materializeScheduledPayload } = require("./materializeScheduledPayload");
 
 const MAX_BURST = 500;
+
+async function canMaterializeSchedules(userId) {
+  if (!isPremiumEnforcementEnabled()) return true;
+
+  const user = await prisma.user.findFirst({
+    where: { id: userId, deletedAt: null },
+    select: {
+      email: true,
+      premiumActive: true,
+      premiumIsLifetime: true,
+      premiumExpiresAt: true,
+    },
+  });
+  if (!user) return false;
+  if (isAdminUserEmail(user.email)) return true;
+  return hasActivePremium(user);
+}
 
 /**
  * Materializes due delayed / recurring transaction templates for every account this user can access.
@@ -11,6 +33,8 @@ const MAX_BURST = 500;
  * @param {string} userId
  */
 async function processPendingSchedulesForUser(userId) {
+  if (!(await canMaterializeSchedules(userId))) return;
+
   const now = new Date();
 
   /** Use nextRunAt for all kinds (DELAY_ONCE sets it equal to executeAt). Relying only on
@@ -94,4 +118,4 @@ async function processPendingSchedulesForUser(userId) {
   }
 }
 
-module.exports = { processPendingSchedulesForUser };
+module.exports = { canMaterializeSchedules, processPendingSchedulesForUser };
