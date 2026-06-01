@@ -90,6 +90,18 @@ model User {
   /// App-level lock after login (separate from this password field).
   appLockEnabled       Boolean @default(false)
   appLockPasswordHash  String? @db.VarChar(255)
+  /// Premium access (RevenueCat). Mirror of the `full_access` entitlement, kept current by the
+  /// RevenueCat webhook (POST /webhooks/revenuecat). The mobile app gates on RevenueCat directly;
+  /// these columns are the server-side source of truth / cross-check.
+  premiumActive        Boolean   @default(false)
+  premiumProductId     String?   @db.VarChar(191)
+  premiumStore         String?   @db.VarChar(32)
+  premiumPeriodType    String?   @db.VarChar(32)
+  premiumExpiresAt     DateTime?
+  premiumWillRenew     Boolean   @default(false)
+  premiumIsLifetime    Boolean   @default(false)
+  premiumUpdatedAt     DateTime?
+  revenueCatCustomerId String?   @db.VarChar(191)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   /// Soft-delete: user cannot sign in; data retained for audit.
@@ -113,6 +125,18 @@ model User {
   receivedAccountInvitations PendingAccountInvitation[] @relation("AccountInvitee")
 
   @@index([deletedAt])
+}
+
+/// Idempotency log for RevenueCat webhook deliveries (events can be retried/duplicated).
+model RevenueCatEvent {
+  /// RevenueCat event id (dedup key).
+  id         String   @id
+  /// `app_user_id` from the event (our User.id when the customer was identified).
+  userId     String?
+  type       String   @db.VarChar(64)
+  receivedAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 model MembershipNotice {

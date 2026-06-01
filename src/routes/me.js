@@ -90,6 +90,11 @@ meRouter.get("/me", requireAuth, async (req, res) => {
       personalAccountId: true,
       firstDayOfWeek: true,
       appLockEnabled: true,
+      premiumActive: true,
+      premiumIsLifetime: true,
+      premiumPeriodType: true,
+      premiumWillRenew: true,
+      premiumExpiresAt: true,
     },
   });
 
@@ -159,6 +164,11 @@ meRouter.patch("/me", requireAuth, async (req, res, next) => {
         personalAccountId: true,
         firstDayOfWeek: true,
         appLockEnabled: true,
+        premiumActive: true,
+        premiumIsLifetime: true,
+        premiumPeriodType: true,
+        premiumWillRenew: true,
+        premiumExpiresAt: true,
       },
     });
 
