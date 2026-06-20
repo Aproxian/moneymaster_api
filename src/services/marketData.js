@@ -143,13 +143,28 @@ async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
       .filter((r) => want.has(sanitizeTwelveDataSymbol(r.providerSymbol).toUpperCase()))
       .map((r) => r.id);
     if (ids.length === 0) return;
+    const heldRows = await prisma.holding.findMany({
+      where: { instrumentId: { in: ids }, deletedAt: null },
+      select: { instrumentId: true },
+      distinct: ["instrumentId"],
+    });
+    const heldIds = new Set(heldRows.map((r) => r.instrumentId));
+    const idsToDeactivate = ids.filter((id) => !heldIds.has(id));
+    if (idsToDeactivate.length === 0) {
+      logApp("WARN", "TwelveData", "skipped_auto_deactivate_held_plan_restricted_symbols", {
+        tickers: [...want],
+        heldInstruments: heldIds.size,
+      });
+      return;
+    }
     const res = await prisma.instrument.updateMany({
-      where: { id: { in: ids } },
+      where: { id: { in: idsToDeactivate } },
       data: { isActive: false },
     });
     logApp("WARN", "TwelveData", "auto_deactivated_plan_restricted_symbols", {
       tickers: [...want],
       rowsUpdated: res.count,
+      skippedHeldInstruments: heldIds.size,
     });
   } catch (e) {
     logApp(
@@ -164,6 +179,16 @@ async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
 async function deactivateTwelveDataInstrumentById(instrumentId) {
   if (!autoDeactivatePlanRestrictedSymbolsEnabled() || !instrumentId) return;
   try {
+    const held = await prisma.holding.findFirst({
+      where: { instrumentId, deletedAt: null },
+      select: { id: true },
+    });
+    if (held) {
+      logApp("WARN", "TwelveData", "skipped_auto_deactivate_held_plan_restricted_instrument", {
+        instrumentId,
+      });
+      return;
+    }
     const res = await prisma.instrument.updateMany({
       where: { id: instrumentId, provider: "TWELVEDATA", isActive: true },
       data: { isActive: false },

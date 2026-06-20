@@ -23,8 +23,8 @@ function isEnforcementEnabled() {
 
 function hasActivePremium(user) {
   if (!user) return false;
-  if (user.premiumIsLifetime) return true;
   if (!user.premiumActive) return false;
+  if (user.premiumIsLifetime) return true;
   if (user.premiumExpiresAt && user.premiumExpiresAt.getTime() <= Date.now()) return false;
   return true;
 }
@@ -67,4 +67,8 @@ async function requirePremium(req, res, next) {
   }
 }
 
-module.exports = { requirePremium, isPremiumEnforcementEnabled: isEnforcementEnabled };
+module.exports = {
+  requirePremium,
+  isPremiumEnforcementEnabled: isEnforcementEnabled,
+  hasActivePremium,
+};

@@ -3,6 +3,7 @@ const { z } = require("zod");
 
 const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
+const { requirePremium } = require("../middleware/requirePremium");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { requireAccountRole } = require("../middleware/requireAccountRole");
 const { seedDefaultCategories } = require("../services/seedDefaultCategories");
@@ -247,6 +248,8 @@ accountsRouter.post("/", async (req, res, next) => {
     next(err);
   }
 });
+
+accountsRouter.use("/:accountId", requirePremium);
 
 accountsRouter.get(
   "/:accountId/members",
