@@ -58,6 +58,7 @@ function concernsFullAccess(event) {
  */
 function computePremiumStateFromEvent(event) {
   const type = String(event?.type || "").toUpperCase();
+  const cancelReason = String(event?.cancel_reason || "").toUpperCase();
   const productId = event?.product_id ?? null;
   const store = event?.store ?? null;
   const periodType = event?.period_type ?? null;
@@ -68,7 +69,7 @@ function computePremiumStateFromEvent(event) {
     productId === PRODUCT_ID_LIFETIME || type === "NON_RENEWING_PURCHASE";
 
   let active;
-  if (REVOKE_TYPES.has(type)) {
+  if (REVOKE_TYPES.has(type) || (type === "CANCELLATION" && cancelReason === "CUSTOMER_SUPPORT")) {
     active = false;
   } else if (isLifetime) {
     active = true;

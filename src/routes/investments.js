@@ -65,6 +65,12 @@ async function assertAdmin(req, res) {
   return user;
 }
 
+async function assertMaintenanceAccess(req, res) {
+  if (req.refreshDailyCron) return true;
+  const user = await assertAdmin(req, res);
+  return Boolean(user);
+}
+
 /** Cron requests must not run arbitrary chunk refresh (credit burn); only sweep control. */
 function rejectCronNonSweepBody(req, res, backgroundSweep, cancelBackgroundSweep) {
   if (!req.refreshDailyCron) return false;
@@ -80,11 +86,7 @@ function rejectCronNonSweepBody(req, res, backgroundSweep, cancelBackgroundSweep
 /** Poll while a background sweep runs (same auth as POST /refresh-daily: JWT admin or cron header). */
 investmentsRouter.get("/twelve-data-sweep-status", refreshDailyAuth, async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
-      const user = await assertAdmin(req, res);
-      if (!user) return;
-    }
+    if (!(await assertMaintenanceAccess(req, res))) return;
     const live = await getTwelveDataSweepLiveStatus();
     return res.json({
       provider: "TWELVEDATA",
@@ -114,11 +116,7 @@ investmentsRouter.post("/refresh-daily", refreshDailyAuth, async (req, res, next
       return;
     }
 
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
-      const user = await assertAdmin(req, res);
-      if (!user) return;
-    }
+    if (!(await assertMaintenanceAccess(req, res))) return;
 
     const auditUserId = req.auth?.userId ?? null;
     const auditCron = Boolean(req.refreshDailyCron);
@@ -250,11 +248,7 @@ investmentsRouter.post("/refresh-daily", refreshDailyAuth, async (req, res, next
 /** Poll while a Yahoo Finance background sweep runs (same auth as POST /refresh-daily-yahoo). */
 investmentsRouter.get("/yahoo-finance-sweep-status", refreshDailyAuth, async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
-      const user = await assertAdmin(req, res);
-      if (!user) return;
-    }
+    if (!(await assertMaintenanceAccess(req, res))) return;
     const live = await getYahooFinanceSweepLiveStatus();
     return res.json({
       provider: "YAHOOFINANCE",
@@ -285,11 +279,7 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
       return;
     }
 
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
-      const user = await assertAdmin(req, res);
-      if (!user) return;
-    }
+    if (!(await assertMaintenanceAccess(req, res))) return;
 
     const auditUserId = req.auth?.userId ?? null;
     const auditCron = Boolean(req.refreshDailyCron);
@@ -419,19 +409,15 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
 });
 
 /**
- * Trim `QuoteCache` to the newest N rows (by createdAt, then asOf, then id).
+ * Trim `QuoteCache` to the newest N rows per instrument (by asOf, then createdAt, then id).
  * Auth: same as POST /investments/refresh-daily (cron header + secret or admin JWT).
  *
- * Query or JSON body: `keepMostRecentCount` (optional). When omitted, defaults to the number of rows
- * in `Instrument` (total instrument count).
+ * Query or JSON body: `keepMostRecentCount` (optional). When omitted, keeps the latest quote
+ * for each instrument.
  */
 investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
-      const user = await assertAdmin(req, res);
-      if (!user) return;
-    }
+    if (!(await assertMaintenanceAccess(req, res))) return;
 
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const raw =
@@ -442,12 +428,12 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
 
     let keepMostRecentCount;
     if (raw === undefined || raw === null || raw === "") {
-      keepMostRecentCount = await prisma.instrument.count();
+      keepMostRecentCount = 1;
     } else {
       const n = parseInt(String(raw), 10);
-      if (!Number.isFinite(n) || n < 0) {
+      if (!Number.isFinite(n) || n < 1) {
         return res.status(400).json({
-          error: "keepMostRecentCount must be a non-negative integer",
+          error: "keepMostRecentCount must be a positive integer",
         });
       }
       keepMostRecentCount = n;
@@ -455,35 +441,31 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
 
     const rowsBefore = await prisma.quoteCache.count();
 
-    if (keepMostRecentCount === 0) {
-      const del = await prisma.quoteCache.deleteMany({});
-      return res.json({
-        ok: true,
-        keepMostRecentCount: 0,
-        rowsBefore,
-        rowsDeleted: del.count,
-        rowsAfter: 0,
-      });
-    }
-
-    if (rowsBefore <= keepMostRecentCount) {
+    if (rowsBefore === 0) {
       return res.json({
         ok: true,
         keepMostRecentCount,
+        keepMostRecentPerInstrument: keepMostRecentCount,
         rowsBefore,
         rowsDeleted: 0,
-        rowsAfter: rowsBefore,
+        rowsAfter: 0,
       });
     }
 
     await prisma.$executeRaw`
       DELETE q FROM QuoteCache q
-      LEFT JOIN (
+      JOIN (
         SELECT id FROM (
-          SELECT id FROM QuoteCache ORDER BY createdAt DESC, asOf DESC, id DESC LIMIT ${keepMostRecentCount}
-        ) inner_keep
-      ) k ON q.id = k.id
-      WHERE k.id IS NULL
+          SELECT
+            id,
+            ROW_NUMBER() OVER (
+              PARTITION BY instrumentId
+              ORDER BY asOf DESC, createdAt DESC, id DESC
+            ) AS rn
+          FROM QuoteCache
+        ) ranked
+        WHERE rn > ${keepMostRecentCount}
+      ) d ON q.id = d.id
     `;
 
     const rowsAfter = await prisma.quoteCache.count();
@@ -492,6 +474,7 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
     return res.json({
       ok: true,
       keepMostRecentCount,
+      keepMostRecentPerInstrument: keepMostRecentCount,
       rowsBefore,
       rowsDeleted,
       rowsAfter,
