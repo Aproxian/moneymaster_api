@@ -3,6 +3,7 @@ const { z } = require("zod");
 
 const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
+const { requirePremium } = require("../middleware/requirePremium");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { requireAccountRole } = require("../middleware/requireAccountRole");
 const { seedDefaultCategories } = require("../services/seedDefaultCategories");
@@ -27,6 +28,21 @@ const {
 } = require("../lib/accountLimits");
 
 const accountsRouter = Router();
+
+async function cancelPendingSchedulesForRemovedMember(tx, accountId, userId) {
+  await tx.pendingTransactionSchedule.updateMany({
+    where: {
+      accountId,
+      createdByUserId: userId,
+      status: "PENDING",
+      cancelledAt: null,
+    },
+    data: {
+      status: "CANCELLED",
+      cancelledAt: new Date(),
+    },
+  });
+}
 
 /**
  * @param {import('@prisma/client').PrismaClient} prismaClient
@@ -250,6 +266,7 @@ accountsRouter.post("/", async (req, res, next) => {
 
 accountsRouter.get(
   "/:accountId/members",
+  requirePremium,
   requireAccountMember("accountId"),
   async (req, res, next) => {
     try {
@@ -277,6 +294,7 @@ accountsRouter.get(
 
 accountsRouter.post(
   "/:accountId/members",
+  requirePremium,
   requireAccountMember("accountId"),
   requireAccountRole("OWNER", "ADMIN"),
   async (req, res, next) => {
@@ -375,6 +393,7 @@ accountsRouter.post(
 
 accountsRouter.delete(
   "/:accountId/members/:memberUserId",
+  requirePremium,
   requireAccountMember("accountId"),
   requireAccountRole("OWNER", "ADMIN"),
   async (req, res, next) => {
@@ -411,6 +430,7 @@ accountsRouter.delete(
             category: { accountId },
           },
         });
+        await cancelPendingSchedulesForRemovedMember(tx, accountId, memberUserId);
         await tx.accountMember.delete({
           where: { userId_accountId: { userId: memberUserId, accountId } },
         });
@@ -447,6 +467,7 @@ accountsRouter.delete(
  */
 accountsRouter.post(
   "/:accountId/transfer-ownership",
+  requirePremium,
   requireAccountMember("accountId"),
   requireAccountRole("OWNER"),
   async (req, res, next) => {
@@ -511,6 +532,7 @@ accountsRouter.post(
  */
 accountsRouter.post(
   "/:accountId/leave",
+  requirePremium,
   requireAccountMember("accountId"),
   async (req, res, next) => {
     try {
@@ -551,6 +573,7 @@ accountsRouter.post(
             category: { accountId },
           },
         });
+        await cancelPendingSchedulesForRemovedMember(tx, accountId, userId);
         await tx.accountMember.delete({
           where: { userId_accountId: { userId, accountId } },
         });
@@ -584,6 +607,7 @@ accountsRouter.post(
 
 accountsRouter.patch(
   "/:accountId",
+  requirePremium,
   requireAccountMember("accountId"),
   requireAccountRole("OWNER", "ADMIN"),
   async (req, res, next) => {
@@ -771,7 +795,7 @@ accountsRouter.patch(
   }
 );
 
-accountsRouter.get("/:accountId", requireAccountMember("accountId"), async (req, res, next) => {
+accountsRouter.get("/:accountId", requirePremium, requireAccountMember("accountId"), async (req, res, next) => {
   try {
     const { accountId } = req.params;
     const userId = req.auth.userId;
@@ -831,6 +855,7 @@ accountsRouter.get("/:accountId", requireAccountMember("accountId"), async (req,
 
 accountsRouter.get(
   "/:accountId/overview",
+  requirePremium,
   requireAccountMember("accountId"),
   async (req, res, next) => {
     try {
@@ -1059,6 +1084,7 @@ accountsRouter.get(
 
 accountsRouter.post(
   "/:accountId/change-currency",
+  requirePremium,
   requireAccountMember("accountId"),
   async (req, res, next) => {
     try {
@@ -1165,6 +1191,7 @@ accountsRouter.post(
 
 accountsRouter.delete(
   "/:accountId",
+  requirePremium,
   requireAccountMember("accountId"),
   requireAccountRole("OWNER"),
   async (req, res, next) => {

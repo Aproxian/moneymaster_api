@@ -284,7 +284,7 @@ meRouter.post("/me/account-invitations/:invitationId/accept", requireAuth, async
 
     const created = await prisma.$transaction(async (tx) => {
       await tx.pendingAccountInvitation.delete({ where: { id: inv.id } });
-      return tx.accountMember.create({
+      const member = await tx.accountMember.create({
         data: {
           userId,
           accountId: inv.accountId,
@@ -298,9 +298,9 @@ meRouter.post("/me/account-invitations/:invitationId/accept", requireAuth, async
           },
         },
       });
+      await syncNewMemberCategoryAccess(tx, inv.accountId, userId);
+      return member;
     });
-
-    await syncNewMemberCategoryAccess(prisma, inv.accountId, userId);
 
     return res.status(201).json({ member: created });
   } catch (err) {
