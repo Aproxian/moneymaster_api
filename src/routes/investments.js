@@ -419,11 +419,11 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
 });
 
 /**
- * Trim `QuoteCache` to the newest N rows (by createdAt, then asOf, then id).
+ * Trim `QuoteCache` to the newest N rows per instrument (by asOf, then createdAt, then id).
  * Auth: same as POST /investments/refresh-daily (cron header + secret or admin JWT).
  *
- * Query or JSON body: `keepMostRecentCount` (optional). When omitted, defaults to the number of rows
- * in `Instrument` (total instrument count).
+ * Query or JSON body: `keepMostRecentCount` (optional). When omitted, defaults to 1
+ * quote per instrument.
  */
 investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, next) => {
   try {
@@ -442,7 +442,7 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
 
     let keepMostRecentCount;
     if (raw === undefined || raw === null || raw === "") {
-      keepMostRecentCount = await prisma.instrument.count();
+      keepMostRecentCount = 1;
     } else {
       const n = parseInt(String(raw), 10);
       if (!Number.isFinite(n) || n < 0) {
@@ -460,6 +460,7 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
       return res.json({
         ok: true,
         keepMostRecentCount: 0,
+        retention: "per_instrument",
         rowsBefore,
         rowsDeleted: del.count,
         rowsAfter: 0,
@@ -470,6 +471,7 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
       return res.json({
         ok: true,
         keepMostRecentCount,
+        retention: "per_instrument",
         rowsBefore,
         rowsDeleted: 0,
         rowsAfter: rowsBefore,
@@ -480,8 +482,15 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
       DELETE q FROM QuoteCache q
       LEFT JOIN (
         SELECT id FROM (
-          SELECT id FROM QuoteCache ORDER BY createdAt DESC, asOf DESC, id DESC LIMIT ${keepMostRecentCount}
+          SELECT
+            id,
+            ROW_NUMBER() OVER (
+              PARTITION BY instrumentId
+              ORDER BY asOf DESC, createdAt DESC, id DESC
+            ) AS rn
+          FROM QuoteCache
         ) inner_keep
+        WHERE rn <= ${keepMostRecentCount}
       ) k ON q.id = k.id
       WHERE k.id IS NULL
     `;
@@ -492,6 +501,7 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
     return res.json({
       ok: true,
       keepMostRecentCount,
+      retention: "per_instrument",
       rowsBefore,
       rowsDeleted,
       rowsAfter,
