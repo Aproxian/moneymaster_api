@@ -369,6 +369,8 @@ model Transaction {
   instrumentId    String?
   /// Units acquired on this INVESTMENT row (used to reverse holdings on revoke).
   investmentQuantity Decimal? @db.Decimal(36, 18)
+  /// Cost basis delta represented by investmentQuantity (positive minor units).
+  investmentCostBasisMinor Int?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt

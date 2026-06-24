@@ -631,6 +631,7 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
         instrumentId: true,
         amountMinor: true,
         investmentQuantity: true,
+        investmentCostBasisMinor: true,
         transferGroupId: true,
         transferPairId: true,
       },
@@ -730,7 +731,11 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
           if (!Number.isFinite(qtyDec) || qtyDec < 0) qtyDec = 0;
           if (qtyDec > qtyHeld) qtyDec = qtyHeld;
 
-          const costDec = Math.min(existing.amountMinor, costHeld);
+          const costBasisMinor =
+            existing.investmentCostBasisMinor != null
+              ? existing.investmentCostBasisMinor
+              : existing.amountMinor;
+          const costDec = Math.min(Math.max(0, costBasisMinor), costHeld);
           const newCost = Math.max(0, costHeld - costDec);
           const newQty = Math.max(0, qtyHeld - qtyDec);
 
@@ -749,6 +754,58 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
               data: {
                 quantity: newQty,
                 costBasisMinor: newCost,
+              },
+            });
+          }
+        }
+      }
+
+      if (
+        existing.type === "INCOME" &&
+        existing.instrumentId &&
+        existing.investmentQuantity != null
+      ) {
+        const qtyRaw = Number(existing.investmentQuantity);
+        if (Number.isFinite(qtyRaw) && qtyRaw < 0) {
+          const qtyInc = Math.abs(qtyRaw);
+          const h = await tx.holding.findUnique({
+            where: {
+              accountId_instrumentId: {
+                accountId,
+                instrumentId: existing.instrumentId,
+              },
+            },
+          });
+
+          let costInc =
+            existing.investmentCostBasisMinor != null
+              ? existing.investmentCostBasisMinor
+              : null;
+          if (costInc == null && h) {
+            const qtyHeld = Number(h.quantity);
+            if (Number.isFinite(qtyHeld) && qtyHeld > 0 && h.costBasisMinor > 0) {
+              costInc = Math.round((h.costBasisMinor / qtyHeld) * qtyInc);
+            }
+          }
+          if (!Number.isFinite(costInc) || costInc < 0) costInc = 0;
+
+          if (h) {
+            const qtyHeld = Number(h.quantity);
+            await tx.holding.update({
+              where: { id: h.id },
+              data: {
+                deletedAt: null,
+                quantity: (Number.isFinite(qtyHeld) ? qtyHeld : 0) + qtyInc,
+                costBasisMinor: h.costBasisMinor + costInc,
+              },
+            });
+          } else {
+            await tx.holding.create({
+              data: {
+                accountId,
+                instrumentId: existing.instrumentId,
+                quantity: qtyInc,
+                costBasisMinor: costInc,
               },
             });
           }
