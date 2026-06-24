@@ -16,7 +16,7 @@ function getWebhookAuthSecret() {
 }
 
 /** Event types that immediately revoke access. */
-const REVOKE_TYPES = new Set(["EXPIRATION", "SUBSCRIPTION_PAUSED"]);
+const REVOKE_TYPES = new Set(["EXPIRATION"]);
 
 /** Event types that grant access (subject to expiry for subscriptions). */
 const GRANT_TYPES = new Set([
@@ -36,9 +36,11 @@ const GRANT_TYPES = new Set([
 function concernsFullAccess(event) {
   const ids = Array.isArray(event?.entitlement_ids) ? event.entitlement_ids : null;
   const single = typeof event?.entitlement_id === "string" ? event.entitlement_id : null;
-  if (!ids && !single) return true; // some events omit entitlement info; do not filter them out
   if (ids && ids.includes(REVENUECAT_ENTITLEMENT_ID)) return true;
   if (single && single === REVENUECAT_ENTITLEMENT_ID) return true;
+  if (!ids && !single) {
+    return event?.product_id === PRODUCT_ID_ANNUAL || event?.product_id === PRODUCT_ID_LIFETIME;
+  }
   return false;
 }
 
