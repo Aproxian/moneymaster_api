@@ -106,6 +106,42 @@ function computePremiumStateFromEvent(event) {
   };
 }
 
+/**
+ * RevenueCat sends product-level events, while our columns mirror aggregate entitlement access.
+ * A stale revocation for an old subscription must not overwrite a later lifetime purchase or a
+ * subscription renewal with a later expiry.
+ *
+ * @param {{ premiumActive?: boolean, premiumIsLifetime?: boolean, premiumExpiresAt?: Date | null } | null} existingUser
+ * @param {{ active: boolean | null, isLifetime: boolean, expiresAt: Date | null }} state
+ * @returns {boolean}
+ */
+function shouldApplyPremiumStateFromEvent(existingUser, state) {
+  if (!existingUser || state.active !== false) return true;
+
+  if (existingUser.premiumIsLifetime && !state.isLifetime) {
+    return false;
+  }
+
+  const existingExpiryMs =
+    existingUser.premiumExpiresAt instanceof Date
+      ? existingUser.premiumExpiresAt.getTime()
+      : existingUser.premiumExpiresAt
+        ? new Date(existingUser.premiumExpiresAt).getTime()
+        : null;
+  const incomingExpiryMs = state.expiresAt instanceof Date ? state.expiresAt.getTime() : null;
+
+  if (
+    existingUser.premiumActive &&
+    Number.isFinite(existingExpiryMs) &&
+    Number.isFinite(incomingExpiryMs) &&
+    existingExpiryMs > incomingExpiryMs
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 module.exports = {
   REVENUECAT_ENTITLEMENT_ID,
   PRODUCT_ID_ANNUAL,
@@ -113,4 +149,5 @@ module.exports = {
   getWebhookAuthSecret,
   concernsFullAccess,
   computePremiumStateFromEvent,
+  shouldApplyPremiumStateFromEvent,
 };

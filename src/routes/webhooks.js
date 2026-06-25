@@ -9,6 +9,7 @@ const {
   getWebhookAuthSecret,
   concernsFullAccess,
   computePremiumStateFromEvent,
+  shouldApplyPremiumStateFromEvent,
 } = require("../lib/revenuecat");
 
 const webhooksRouter = Router();
@@ -72,6 +73,27 @@ webhooksRouter.post("/revenuecat", async (req, res, next) => {
     if (state.active === null) {
       // Indeterminate (TEST/TRANSFER/unknown): acknowledge without mutating the user.
       return res.json({ ok: true, applied: false, reason: "indeterminate", type });
+    }
+
+    const existingUser = await prisma.user.findUnique({
+      where: { id: appUserId },
+      select: {
+        id: true,
+        premiumActive: true,
+        premiumIsLifetime: true,
+        premiumExpiresAt: true,
+      },
+    });
+    if (!existingUser) {
+      return res.json({ ok: true, applied: false, type });
+    }
+    if (!shouldApplyPremiumStateFromEvent(existingUser, state)) {
+      logApp("INFO", "RevenueCat", "stale premium downgrade ignored", {
+        type,
+        userId: appUserId,
+        productId: state.productId,
+      });
+      return res.json({ ok: true, applied: false, reason: "stale_downgrade", type });
     }
 
     const updated = await prisma.user.updateMany({
