@@ -8,6 +8,15 @@ const {
   PRODUCT_ID_LIFETIME,
   computePremiumStateFromEvent,
 } = require("../src/lib/revenuecat");
+
+const prismaModulePath = require.resolve("../src/prisma");
+require.cache[prismaModulePath] = {
+  id: prismaModulePath,
+  filename: prismaModulePath,
+  loaded: true,
+  exports: { prisma: {} },
+};
+
 const {
   applyPremiumStateEvent,
   NoMatchingRevenueCatUserError,
