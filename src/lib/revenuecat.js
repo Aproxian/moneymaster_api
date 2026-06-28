@@ -29,6 +29,12 @@ const GRANT_TYPES = new Set([
   "TEMPORARY_ENTITLEMENT_GRANT",
 ]);
 
+function isCustomerSupportCancellation(event, type) {
+  if (type !== "CANCELLATION") return false;
+  const reason = String(event?.cancel_reason || event?.cancellation_reason || "").toUpperCase();
+  return reason === "CUSTOMER_SUPPORT";
+}
+
 /**
  * @param {Record<string, any>} event RevenueCat webhook `event` object.
  * @returns {boolean} whether the event concerns the `full_access` entitlement.
@@ -68,7 +74,7 @@ function computePremiumStateFromEvent(event) {
     productId === PRODUCT_ID_LIFETIME || type === "NON_RENEWING_PURCHASE";
 
   let active;
-  if (REVOKE_TYPES.has(type)) {
+  if (REVOKE_TYPES.has(type) || isCustomerSupportCancellation(event, type)) {
     active = false;
   } else if (isLifetime) {
     active = true;
