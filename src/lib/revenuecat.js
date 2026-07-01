@@ -61,14 +61,17 @@ function computePremiumStateFromEvent(event) {
   const productId = event?.product_id ?? null;
   const store = event?.store ?? null;
   const periodType = event?.period_type ?? null;
+  const cancelReason = String(event?.cancel_reason || "").toUpperCase();
   const expMs =
     typeof event?.expiration_at_ms === "number" ? event.expiration_at_ms : null;
 
   const isLifetime =
     productId === PRODUCT_ID_LIFETIME || type === "NON_RENEWING_PURCHASE";
+  const isRefundCancellation =
+    type === "CANCELLATION" && cancelReason === "CUSTOMER_SUPPORT";
 
   let active;
-  if (REVOKE_TYPES.has(type)) {
+  if (REVOKE_TYPES.has(type) || isRefundCancellation) {
     active = false;
   } else if (isLifetime) {
     active = true;
