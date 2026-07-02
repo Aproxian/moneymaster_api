@@ -30,6 +30,10 @@ const {
   isLocalYahooSweepRunnerActive,
   requestRemoteYahooSweepCancel,
 } = require("../services/yahooFinanceRefreshScheduler");
+const {
+  parseKeepMostRecentCount,
+  trimQuoteCache,
+} = require("../services/quoteCacheTrim");
 
 const investmentsRouter = Router();
 
@@ -419,11 +423,10 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
 });
 
 /**
- * Trim `QuoteCache` to the newest N rows (by createdAt, then asOf, then id).
+ * Trim `QuoteCache` to the newest N rows per instrument/provider (by createdAt, then asOf, then id).
  * Auth: same as POST /investments/refresh-daily (cron header + secret or admin JWT).
  *
- * Query or JSON body: `keepMostRecentCount` (optional). When omitted, defaults to the number of rows
- * in `Instrument` (total instrument count).
+ * Query or JSON body: `keepMostRecentCount` (optional). When omitted, defaults to 1.
  */
 investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, next) => {
   try {
@@ -441,61 +444,13 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
       body.keep_most_recent_count;
 
     let keepMostRecentCount;
-    if (raw === undefined || raw === null || raw === "") {
-      keepMostRecentCount = await prisma.instrument.count();
-    } else {
-      const n = parseInt(String(raw), 10);
-      if (!Number.isFinite(n) || n < 0) {
-        return res.status(400).json({
-          error: "keepMostRecentCount must be a non-negative integer",
-        });
-      }
-      keepMostRecentCount = n;
+    try {
+      keepMostRecentCount = parseKeepMostRecentCount(raw);
+    } catch (err) {
+      return res.status(err.statusCode || 400).json({ error: err.message });
     }
 
-    const rowsBefore = await prisma.quoteCache.count();
-
-    if (keepMostRecentCount === 0) {
-      const del = await prisma.quoteCache.deleteMany({});
-      return res.json({
-        ok: true,
-        keepMostRecentCount: 0,
-        rowsBefore,
-        rowsDeleted: del.count,
-        rowsAfter: 0,
-      });
-    }
-
-    if (rowsBefore <= keepMostRecentCount) {
-      return res.json({
-        ok: true,
-        keepMostRecentCount,
-        rowsBefore,
-        rowsDeleted: 0,
-        rowsAfter: rowsBefore,
-      });
-    }
-
-    await prisma.$executeRaw`
-      DELETE q FROM QuoteCache q
-      LEFT JOIN (
-        SELECT id FROM (
-          SELECT id FROM QuoteCache ORDER BY createdAt DESC, asOf DESC, id DESC LIMIT ${keepMostRecentCount}
-        ) inner_keep
-      ) k ON q.id = k.id
-      WHERE k.id IS NULL
-    `;
-
-    const rowsAfter = await prisma.quoteCache.count();
-    const rowsDeleted = rowsBefore - rowsAfter;
-
-    return res.json({
-      ok: true,
-      keepMostRecentCount,
-      rowsBefore,
-      rowsDeleted,
-      rowsAfter,
-    });
+    return res.json(await trimQuoteCache(prisma, keepMostRecentCount));
   } catch (err) {
     next(err);
   }

@@ -24,6 +24,20 @@ function isAuthorized(req, secret) {
   return false;
 }
 
+function isUniqueConstraintError(err) {
+  return err?.code === "P2002";
+}
+
+async function recordIgnoredEvent(eventId, appUserId, type) {
+  try {
+    await prisma.revenueCatEvent.create({ data: { id: eventId, userId: appUserId, type } });
+    return true;
+  } catch (err) {
+    if (isUniqueConstraintError(err)) return false;
+    throw err;
+  }
+}
+
 /**
  * RevenueCat webhook → keep User premium columns in sync with the `full_access` entitlement.
  * Configure in RevenueCat dashboard → Project → Webhooks:
@@ -51,43 +65,51 @@ webhooksRouter.post("/revenuecat", async (req, res, next) => {
     const type = String(event.type || "UNKNOWN").toUpperCase();
     const appUserId = typeof event.app_user_id === "string" ? event.app_user_id : null;
 
-    // Idempotency: RevenueCat retries deliveries. Record-first; a duplicate id short-circuits.
-    const already = await prisma.revenueCatEvent.findUnique({ where: { id: eventId } });
-    if (already) {
-      return res.json({ ok: true, deduped: true });
-    }
-    await prisma.revenueCatEvent
-      .create({ data: { id: eventId, userId: appUserId, type } })
-      .catch(() => {
-        /* race on retry: another delivery inserted it first — proceed harmlessly */
-      });
-
     // Only `full_access` events and identified (non-anonymous) users change premium state.
     const anonymous = !appUserId || appUserId.startsWith("$RCAnonymousID:");
     if (anonymous || !concernsFullAccess(event)) {
+      const recorded = await recordIgnoredEvent(eventId, appUserId, type);
+      if (!recorded) {
+        return res.json({ ok: true, deduped: true });
+      }
       return res.json({ ok: true, applied: false, reason: "no_matching_user_or_entitlement" });
     }
 
     const state = computePremiumStateFromEvent(event);
     if (state.active === null) {
       // Indeterminate (TEST/TRANSFER/unknown): acknowledge without mutating the user.
+      const recorded = await recordIgnoredEvent(eventId, appUserId, type);
+      if (!recorded) {
+        return res.json({ ok: true, deduped: true });
+      }
       return res.json({ ok: true, applied: false, reason: "indeterminate", type });
     }
 
-    const updated = await prisma.user.updateMany({
-      where: { id: appUserId },
-      data: {
-        premiumActive: state.active,
-        premiumProductId: state.productId,
-        premiumStore: state.store,
-        premiumPeriodType: state.periodType,
-        premiumExpiresAt: state.expiresAt,
-        premiumWillRenew: state.willRenew,
-        premiumIsLifetime: state.isLifetime,
-        premiumUpdatedAt: new Date(),
-        revenueCatCustomerId: appUserId,
-      },
-    });
+    let updated;
+    try {
+      updated = await prisma.$transaction(async (tx) => {
+        await tx.revenueCatEvent.create({ data: { id: eventId, userId: appUserId, type } });
+        return tx.user.updateMany({
+          where: { id: appUserId },
+          data: {
+            premiumActive: state.active,
+            premiumProductId: state.productId,
+            premiumStore: state.store,
+            premiumPeriodType: state.periodType,
+            premiumExpiresAt: state.expiresAt,
+            premiumWillRenew: state.willRenew,
+            premiumIsLifetime: state.isLifetime,
+            premiumUpdatedAt: new Date(),
+            revenueCatCustomerId: appUserId,
+          },
+        });
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        return res.json({ ok: true, deduped: true });
+      }
+      throw err;
+    }
 
     logApp("INFO", "RevenueCat", "webhook applied", {
       type,

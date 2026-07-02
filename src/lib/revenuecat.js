@@ -64,8 +64,7 @@ function computePremiumStateFromEvent(event) {
   const expMs =
     typeof event?.expiration_at_ms === "number" ? event.expiration_at_ms : null;
 
-  const isLifetime =
-    productId === PRODUCT_ID_LIFETIME || type === "NON_RENEWING_PURCHASE";
+  const isLifetime = productId === PRODUCT_ID_LIFETIME;
 
   let active;
   if (REVOKE_TYPES.has(type)) {
