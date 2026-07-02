@@ -10,6 +10,7 @@ const { seedDefaultCategories } = require("../services/seedDefaultCategories");
 const { isAdminUserEmail } = require("../lib/adminUser");
 const { processPendingSchedulesForUser } = require("../services/processPendingSchedules");
 const { logApp } = require("../lib/fileLogger");
+const { normalizeTimeZone } = require("../lib/timezone");
 
 const authRouter = Router();
 
@@ -41,6 +42,7 @@ const registerSchema = z.object({
   displayName: z.string().min(1).max(80).optional(),
   currency: z.string().min(1).max(10).optional(),
   investingEnabled: z.boolean().optional(),
+  timezone: z.string().min(1).max(64).optional(),
 });
 
 authRouter.post("/register", async (req, res, next) => {
@@ -48,6 +50,7 @@ authRouter.post("/register", async (req, res, next) => {
     const body = registerSchema.parse(req.body);
     const accountCurrency = (body.currency ?? "EUR").toUpperCase();
     const investingEnabled = body.investingEnabled ?? true;
+    const timezone = normalizeTimeZone(body.timezone);
 
     const existing = await prisma.user.findUnique({ where: { email: body.email } });
     if (existing) return res.status(409).json({ error: "Email already in use" });
@@ -61,6 +64,7 @@ authRouter.post("/register", async (req, res, next) => {
           email: body.email,
           passwordHash,
           displayName: body.displayName ?? null,
+          timezone,
         },
         select: {
           id: true,
@@ -68,6 +72,7 @@ authRouter.post("/register", async (req, res, next) => {
           displayName: true,
           firstDayOfWeek: true,
           appLockEnabled: true,
+          timezone: true,
         },
       });
 
@@ -76,6 +81,7 @@ authRouter.post("/register", async (req, res, next) => {
           name: "Personal",
           currency: accountCurrency,
           investingEnabled,
+          timezone,
           members: {
             create: {
               userId: user.id,
@@ -164,6 +170,7 @@ authRouter.post("/login", async (req, res, next) => {
         deletedAt: true,
         firstDayOfWeek: true,
         appLockEnabled: true,
+        timezone: true,
       },
     });
 
@@ -212,6 +219,7 @@ authRouter.post("/login", async (req, res, next) => {
         personalAccountId: user.personalAccountId,
         firstDayOfWeek: user.firstDayOfWeek,
         appLockEnabled: user.appLockEnabled,
+        timezone: user.timezone,
         isAdmin: isAdminUserEmail(user.email),
       },
       accessToken,

@@ -9,6 +9,7 @@ const { processPendingSchedulesForUser } = require("../services/processPendingSc
 const { getMaintenanceState, setMaintenanceState } = require("../services/globalAppState");
 const { logApp } = require("../lib/fileLogger");
 const { syncNewMemberCategoryAccess } = require("../services/categoryMemberAccess");
+const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
 const {
   MAX_ACCOUNTS_PER_USER,
   ACCOUNT_LIMIT_REACHED_MESSAGE,
@@ -69,6 +70,7 @@ const patchMeSchema = z.object({
   displayName: z.string().max(80).optional(),
   email: z.string().email().max(255).optional(),
   firstDayOfWeek: z.number().int().min(0).max(6).optional(),
+  timezone: z.string().min(1).max(64).optional(),
 });
 
 const lockPairSchema = z.object({
@@ -90,6 +92,7 @@ meRouter.get("/me", requireAuth, async (req, res) => {
       personalAccountId: true,
       firstDayOfWeek: true,
       appLockEnabled: true,
+      timezone: true,
       premiumActive: true,
       premiumIsLifetime: true,
       premiumPeriodType: true,
@@ -125,10 +128,14 @@ meRouter.patch("/me", requireAuth, async (req, res, next) => {
 
     const active = await prisma.user.findFirst({
       where: { id: userId, deletedAt: null },
-      select: { id: true },
+      select: { id: true, personalAccountId: true },
     });
     if (!active) {
       return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    if (body.timezone !== undefined && !isValidTimeZone(body.timezone)) {
+      return res.status(400).json({ error: "Invalid timezone" });
     }
 
     if (body.email) {
@@ -152,6 +159,7 @@ meRouter.patch("/me", requireAuth, async (req, res, next) => {
     }
     if (body.email !== undefined) data.email = body.email.trim().toLowerCase();
     if (body.firstDayOfWeek !== undefined) data.firstDayOfWeek = body.firstDayOfWeek;
+    if (body.timezone !== undefined) data.timezone = normalizeTimeZone(body.timezone);
 
     const user = await prisma.user.update({
       where: { id: userId },
@@ -164,6 +172,7 @@ meRouter.patch("/me", requireAuth, async (req, res, next) => {
         personalAccountId: true,
         firstDayOfWeek: true,
         appLockEnabled: true,
+        timezone: true,
         premiumActive: true,
         premiumIsLifetime: true,
         premiumPeriodType: true,
@@ -171,6 +180,14 @@ meRouter.patch("/me", requireAuth, async (req, res, next) => {
         premiumExpiresAt: true,
       },
     });
+
+    // The personal account follows the user's timezone.
+    if (data.timezone !== undefined && active.personalAccountId) {
+      await prisma.account.update({
+        where: { id: active.personalAccountId },
+        data: { timezone: data.timezone },
+      });
+    }
 
     return res.json({
       user: {

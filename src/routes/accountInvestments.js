@@ -5,6 +5,7 @@ const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
+const { ymdToZonedNoonUtc } = require("../lib/timezone");
 
 // Mounted at /accounts/:accountId/investments
 const accountInvestmentsRouter = Router({ mergeParams: true });
@@ -15,6 +16,10 @@ const createInvestmentSchema = z.object({
   amountMinor: z.number().int().positive(),
   quantity: z.number().positive(),
   occurredAt: z.coerce.date().optional(),
+  occurredOnDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "occurredOnDate must be YYYY-MM-DD")
+    .optional(),
   note: z.string().max(500).optional(),
   walletId: z.string().min(1).optional(),
 });
@@ -31,7 +36,13 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, currency: true, investingEnabled: true, walletsEnabled: true },
+      select: {
+        id: true,
+        currency: true,
+        timezone: true,
+        investingEnabled: true,
+        walletsEnabled: true,
+      },
     });
 
     if (!account) {
@@ -113,7 +124,14 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
 
     // For now we assume instrument prices and account currency match,
     // so no FX is applied at this layer.
-    const occurredAt = body.occurredAt ?? new Date();
+    let occurredAt = body.occurredAt ?? null;
+    if (!occurredAt && body.occurredOnDate) {
+      occurredAt = ymdToZonedNoonUtc(body.occurredOnDate, account.timezone);
+      if (!occurredAt) {
+        return res.status(400).json({ error: "Invalid occurredOnDate" });
+      }
+    }
+    if (!occurredAt) occurredAt = new Date();
 
     const result = await prisma.$transaction(async (tx) => {
       const txRow = await tx.transaction.create({

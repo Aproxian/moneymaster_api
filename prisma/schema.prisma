@@ -87,6 +87,8 @@ model User {
   personalAccountId String? @unique
   /// First day of week for calendars: 0=Sun … 6=Sat (like JS getDay). Default 1=Monday.
   firstDayOfWeek Int @default(1)
+  /// IANA timezone (e.g. "Europe/Athens"). Drives the personal account and is the default for new accounts.
+  timezone       String @default("UTC") @db.VarChar(64)
   /// App-level lock after login (separate from this password field).
   appLockEnabled       Boolean @default(false)
   appLockPasswordHash  String? @db.VarChar(255)
@@ -172,6 +174,8 @@ model Account {
   id        String    @id @default(cuid())
   name      String
   currency  String    @default("EUR")
+  /// IANA timezone (e.g. "Europe/Athens"). Past-dated transactions are anchored to noon in this zone.
+  timezone  String    @default("UTC") @db.VarChar(64)
   /// When true, user splits cash flow into emoji wallets (cash/card defaults on enable).
   walletsEnabled Boolean @default(false)
   /// True while first-time wallet setup is in progress; wallets exist but feature is not live until completed.

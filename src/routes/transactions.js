@@ -6,6 +6,7 @@ const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
+const { ymdToZonedNoonUtc } = require("../lib/timezone");
 
 /**
  * @param {string} accountId
@@ -65,6 +66,11 @@ const createTransactionSchema = z.object({
   amountMinor: z.number().int().positive(),
   currency: z.string().min(1).max(10).optional(),
   occurredAt: z.coerce.date().optional(),
+  /** Calendar date ("YYYY-MM-DD") for back-dated entries; anchored to noon in the account timezone. */
+  occurredOnDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "occurredOnDate must be YYYY-MM-DD")
+    .optional(),
   note: z.string().max(500).optional(),
   categoryId: z.string().min(1),
   walletId: z.string().min(1).optional(),
@@ -472,7 +478,13 @@ transactionsRouter.post("/", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, currency: true, walletsEnabled: true, walletMigrationPending: true },
+      select: {
+        id: true,
+        currency: true,
+        timezone: true,
+        walletsEnabled: true,
+        walletMigrationPending: true,
+      },
     });
 
     if (!account) {
@@ -548,7 +560,16 @@ transactionsRouter.post("/", async (req, res, next) => {
       });
     }
 
-    const occurredAt = body.occurredAt ?? new Date();
+    // Priority: explicit instant (occurredAt) > back-dated calendar date (noon in
+    // account timezone) > server "now".
+    let occurredAt = body.occurredAt ?? null;
+    if (!occurredAt && body.occurredOnDate) {
+      occurredAt = ymdToZonedNoonUtc(body.occurredOnDate, account.timezone);
+      if (!occurredAt) {
+        return res.status(400).json({ error: "Invalid occurredOnDate" });
+      }
+    }
+    if (!occurredAt) occurredAt = new Date();
 
     if (body.type === "EXPENSE") {
       try {

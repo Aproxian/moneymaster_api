@@ -25,6 +25,7 @@ const {
   INVITEE_AT_ACCOUNT_LIMIT_MESSAGE,
   countActiveAccountMemberships,
 } = require("../lib/accountLimits");
+const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
 
 const accountsRouter = Router();
 
@@ -45,6 +46,7 @@ async function loadAccountDetail(prismaClient, accountId, userId, memberRole) {
       id: true,
       name: true,
       currency: true,
+      timezone: true,
       investingEnabled: true,
       walletsEnabled: true,
       walletMigrationPending: true,
@@ -87,6 +89,7 @@ const createAccountSchema = z.object({
   name: z.string().min(1).max(120),
   currency: z.string().min(1).max(10),
   investingEnabled: z.boolean().optional(),
+  timezone: z.string().min(1).max(64).optional(),
   isBusiness: z.boolean().optional(),
   companyName: z.string().max(200).optional().nullable(),
   companyLegalName: z.string().max(200).optional().nullable(),
@@ -99,6 +102,7 @@ const patchAccountSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   walletsEnabled: z.boolean().optional(),
   investingEnabled: z.boolean().optional(),
+  timezone: z.string().min(1).max(64).optional(),
   isBusiness: z.boolean().optional(),
   companyName: z.string().max(200).optional().nullable(),
   companyLegalName: z.string().max(200).optional().nullable(),
@@ -149,6 +153,7 @@ accountsRouter.get("/", async (req, res, next) => {
         id: true,
         name: true,
         currency: true,
+        timezone: true,
         investingEnabled: true,
         walletsEnabled: true,
         walletMigrationPending: true,
@@ -172,6 +177,7 @@ accountsRouter.get("/", async (req, res, next) => {
         id: a.id,
         name: a.name,
         currency: a.currency,
+        timezone: a.timezone,
         investingEnabled: a.investingEnabled,
         walletsEnabled: a.walletsEnabled,
         walletMigrationPending: a.walletMigrationPending,
@@ -197,6 +203,15 @@ accountsRouter.post("/", async (req, res, next) => {
     const isBusiness = Boolean(body.isBusiness);
     const investingEnabled = body.investingEnabled ?? true;
 
+    const creator = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { timezone: true },
+    });
+    // Client normally sends the desired zone; fall back to the creator's timezone.
+    const timezone = body.timezone
+      ? normalizeTimeZone(body.timezone)
+      : normalizeTimeZone(creator?.timezone);
+
     const membershipCount = await countActiveAccountMemberships(prisma, userId);
     if (membershipCount >= MAX_ACCOUNTS_PER_USER) {
       return res.status(403).json({
@@ -210,6 +225,7 @@ accountsRouter.post("/", async (req, res, next) => {
         data: {
           name: body.name.trim(),
           currency,
+          timezone,
           investingEnabled,
           isBusiness,
           companyName: isBusiness ? body.companyName?.trim() || null : null,
@@ -228,6 +244,7 @@ accountsRouter.post("/", async (req, res, next) => {
           id: true,
           name: true,
           currency: true,
+          timezone: true,
           investingEnabled: true,
           isBusiness: true,
           companyName: true,
@@ -605,6 +622,22 @@ accountsRouter.patch(
       });
       if (!existing) return res.status(404).json({ error: "Account not found" });
 
+      if (body.timezone !== undefined) {
+        if (!isValidTimeZone(body.timezone)) {
+          return res.status(400).json({ error: "Invalid timezone" });
+        }
+        const me = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { personalAccountId: true },
+        });
+        if (me?.personalAccountId === accountId) {
+          return res.status(400).json({
+            error: "Change your personal account's timezone from your profile settings",
+            code: "PERSONAL_TIMEZONE_VIA_PROFILE",
+          });
+        }
+      }
+
       const migCount =
         (body.cancelWalletMigration ? 1 : 0) +
         (body.completeWalletMigration ? 1 : 0) +
@@ -700,6 +733,7 @@ accountsRouter.patch(
 
       const data = {};
       if (body.name !== undefined) data.name = body.name.trim();
+      if (body.timezone !== undefined) data.timezone = normalizeTimeZone(body.timezone);
       if (body.walletsEnabled !== undefined) data.walletsEnabled = body.walletsEnabled;
       if (body.investingEnabled !== undefined) data.investingEnabled = body.investingEnabled;
       if (body.isBusiness !== undefined) data.isBusiness = body.isBusiness;
@@ -787,6 +821,7 @@ accountsRouter.get("/:accountId", requireAccountMember("accountId"), async (req,
         id: true,
         name: true,
         currency: true,
+        timezone: true,
         investingEnabled: true,
         walletsEnabled: true,
         walletMigrationPending: true,
