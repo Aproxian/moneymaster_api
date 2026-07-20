@@ -6,6 +6,7 @@ const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const { optionalCoercedDate } = require("../lib/zodDate");
 
 // Mounted at /accounts/:accountId/investments
 const accountInvestmentsRouter = Router({ mergeParams: true });
@@ -15,7 +16,7 @@ const createInvestmentSchema = z.object({
   categoryId: z.string().min(1),
   amountMinor: z.number().int().positive(),
   quantity: z.number().positive(),
-  occurredAt: z.coerce.date().optional(),
+  occurredAt: optionalCoercedDate,
   occurredOnDate: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/, "occurredOnDate must be YYYY-MM-DD")

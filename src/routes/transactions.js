@@ -57,6 +57,7 @@ async function attachTransferPeerAccountNames(accountId, rows) {
 
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
+const { optionalCoercedDate } = require("../lib/zodDate");
 
 // Mounted at /accounts/:accountId/transactions
 const transactionsRouter = Router({ mergeParams: true });
@@ -65,7 +66,7 @@ const createTransactionSchema = z.object({
   type: z.enum(["INCOME", "EXPENSE"]),
   amountMinor: z.number().int().positive(),
   currency: z.string().min(1).max(10).optional(),
-  occurredAt: z.coerce.date().optional(),
+  occurredAt: optionalCoercedDate,
   /** Calendar date ("YYYY-MM-DD") for back-dated entries; anchored to noon in the account timezone. */
   occurredOnDate: z
     .string()
