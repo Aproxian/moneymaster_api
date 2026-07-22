@@ -7,6 +7,7 @@ const {
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const { isInvestmentCashOut } = require("../lib/investmentTransactions");
 
 /**
  * @param {string} accountId
@@ -654,6 +655,9 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
         investmentQuantity: true,
         transferGroupId: true,
         transferPairId: true,
+        category: {
+          select: { internalKey: true },
+        },
       },
     });
 
@@ -663,6 +667,14 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
 
     if (existing.revokedAt) {
       return res.status(400).json({ error: "Transaction is already revoked" });
+    }
+
+    if (isInvestmentCashOut(existing)) {
+      return res.status(409).json({
+        code: "cash_out_revoke_not_supported",
+        error:
+          "Cash-out transactions cannot be revoked because doing so would corrupt the investment holding.",
+      });
     }
 
     const updated = await prisma.$transaction(async (tx) => {
