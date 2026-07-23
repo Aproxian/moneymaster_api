@@ -25,6 +25,10 @@ const {
   INVITEE_AT_ACCOUNT_LIMIT_MESSAGE,
   countActiveAccountMemberships,
 } = require("../lib/accountLimits");
+const {
+  OwnerCannotLeaveError,
+  deleteNonOwnerMembership,
+} = require("../lib/accountOwnership");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
 
 const accountsRouter = Router();
@@ -568,9 +572,7 @@ accountsRouter.post(
             category: { accountId },
           },
         });
-        await tx.accountMember.delete({
-          where: { userId_accountId: { userId, accountId } },
-        });
+        await deleteNonOwnerMembership(tx, userId, accountId);
       });
 
       await prisma.membershipNotice.create({
@@ -594,6 +596,12 @@ accountsRouter.post(
 
       return res.status(204).send();
     } catch (err) {
+      if (err instanceof OwnerCannotLeaveError) {
+        return res.status(403).json({
+          error: "owner_cannot_leave",
+          message: "Transfer ownership to another member before leaving this account.",
+        });
+      }
       next(err);
     }
   }
