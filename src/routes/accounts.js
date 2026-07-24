@@ -129,6 +129,36 @@ const changeCurrencySchema = z.object({
   fxRate: z.number().positive(),
 });
 
+/**
+ * Convert minor-unit amounts with the same rounding used for ledger rows.
+ * @param {number} amountMinor
+ * @param {number} fxRate
+ */
+function convertMinorUnits(amountMinor, fxRate) {
+  return Math.round(Number(amountMinor) * fxRate);
+}
+
+/**
+ * Apply FX conversion to a pending schedule payload's amountMinor.
+ * Returns null when the payload has no convertible amount.
+ * @param {unknown} payload
+ * @param {number} fxRate
+ * @returns {Record<string, unknown> | null}
+ */
+function convertSchedulePayloadCurrency(payload, fxRate) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const amountMinor = Number(/** @type {{ amountMinor?: unknown }} */ (payload).amountMinor);
+  if (!Number.isFinite(amountMinor)) {
+    return null;
+  }
+  return {
+    .../** @type {Record<string, unknown>} */ (payload),
+    amountMinor: convertMinorUnits(amountMinor, fxRate),
+  };
+}
+
 accountsRouter.use(requireAuth);
 
 accountsRouter.get("/", async (req, res, next) => {
@@ -1138,7 +1168,7 @@ accountsRouter.post(
         });
 
         for (const t of txns) {
-          const converted = Math.round(t.amountMinor * fxRate);
+          const converted = convertMinorUnits(t.amountMinor, fxRate);
           await tx.transaction.update({
             where: { id: t.id },
             data: {
@@ -1146,6 +1176,34 @@ accountsRouter.post(
               currency: newCurrency,
             },
           });
+        }
+
+        // Pending schedule payloads store amountMinor in account currency without a
+        // currency field. Materialization stamps account.currency onto new rows, so
+        // these must be converted with the same FX rate or later runs post wrong amounts.
+        const schedules = await tx.pendingTransactionSchedule.findMany({
+          where: {
+            accountId: account.id,
+            cancelledAt: null,
+          },
+          select: {
+            id: true,
+            payload: true,
+          },
+        });
+
+        let affectedSchedules = 0;
+        for (const schedule of schedules) {
+          const convertedPayload = convertSchedulePayloadCurrency(
+            schedule.payload,
+            fxRate
+          );
+          if (!convertedPayload) continue;
+          await tx.pendingTransactionSchedule.update({
+            where: { id: schedule.id },
+            data: { payload: convertedPayload },
+          });
+          affectedSchedules += 1;
         }
 
         const currencyChange = await tx.accountCurrencyChange.create({
@@ -1177,6 +1235,7 @@ accountsRouter.post(
               fxRate,
               accountId: account.id,
               affectedTransactions: txns.length,
+              affectedSchedules,
               currencyChangeId: currencyChange.id,
             },
           },
@@ -1188,6 +1247,7 @@ accountsRouter.post(
           newCurrency,
           fxRate,
           affectedTransactions: txns.length,
+          affectedSchedules,
         };
       });
 
@@ -1252,5 +1312,9 @@ accountsRouter.delete(
   }
 );
 
-module.exports = { accountsRouter };
+module.exports = {
+  accountsRouter,
+  convertMinorUnits,
+  convertSchedulePayloadCurrency,
+};
 
