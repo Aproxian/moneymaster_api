@@ -36,9 +36,14 @@ const GRANT_TYPES = new Set([
 function concernsFullAccess(event) {
   const ids = Array.isArray(event?.entitlement_ids) ? event.entitlement_ids : null;
   const single = typeof event?.entitlement_id === "string" ? event.entitlement_id : null;
-  if (!ids && !single) return true; // some events omit entitlement info; do not filter them out
   if (ids && ids.includes(REVENUECAT_ENTITLEMENT_ID)) return true;
   if (single && single === REVENUECAT_ENTITLEMENT_ID) return true;
+  // RevenueCat sends entitlement_ids=null for products that are not mapped to an
+  // entitlement. Only fall back to product ids that this API knows are premium.
+  if (!ids && !single) {
+    const productId = typeof event?.product_id === "string" ? event.product_id : null;
+    return productId === PRODUCT_ID_ANNUAL || productId === PRODUCT_ID_LIFETIME;
+  }
   return false;
 }
 
@@ -64,8 +69,7 @@ function computePremiumStateFromEvent(event) {
   const expMs =
     typeof event?.expiration_at_ms === "number" ? event.expiration_at_ms : null;
 
-  const isLifetime =
-    productId === PRODUCT_ID_LIFETIME || type === "NON_RENEWING_PURCHASE";
+  const isLifetime = productId === PRODUCT_ID_LIFETIME;
 
   let active;
   if (REVOKE_TYPES.has(type)) {
@@ -85,6 +89,7 @@ function computePremiumStateFromEvent(event) {
   if (isLifetime) {
     willRenew = false;
   } else if (
+    type === "NON_RENEWING_PURCHASE" ||
     type === "CANCELLATION" ||
     type === "EXPIRATION" ||
     type === "SUBSCRIPTION_PAUSED" ||
