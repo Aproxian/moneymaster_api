@@ -7,6 +7,10 @@ const {
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  AlreadyRevokedError,
+  claimTransactionRevoke,
+} = require("../lib/claimTransactionRevoke");
 
 /**
  * @param {string} accountId
@@ -725,6 +729,14 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
         });
       }
 
+      // Claim before holding side effects so concurrent revoke cannot
+      // decrement quantity/cost basis twice for the same buy.
+      await claimTransactionRevoke(tx, {
+        transactionId,
+        accountId,
+        revokedAt: now,
+      });
+
       if (
         existing.type === "INVESTMENT" &&
         existing.instrumentId &&
@@ -776,9 +788,8 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
         }
       }
 
-      return tx.transaction.update({
+      return tx.transaction.findFirst({
         where: { id: transactionId },
-        data: { revokedAt: now },
         select: {
           id: true,
           type: true,
@@ -816,6 +827,9 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
       },
     });
   } catch (err) {
+    if (err instanceof AlreadyRevokedError) {
+      return res.status(400).json({ error: err.message });
+    }
     next(err);
   }
 });
