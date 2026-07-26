@@ -5,6 +5,10 @@ const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
+const {
+  lockOpenHoldingForUpdate,
+  planCashOutHoldingUpdate,
+} = require("../lib/lockHolding");
 const { getPrimaryOwnerUserId } = require("../services/categoryMemberAccess");
 const { ensureInvestmentCategories } = require("../services/investingCategories");
 
@@ -194,8 +198,11 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const holding = await tx.holding.findFirst({
-        where: { accountId, instrumentId, deletedAt: null },
+      // Serialize cash-outs on this holding so concurrent sells cannot both
+      // pass the quantity check against the same pre-write balance.
+      const holding = await lockOpenHoldingForUpdate(tx, {
+        accountId,
+        instrumentId,
       });
       if (!holding) {
         const err = new Error("NO_HOLDING");
@@ -203,10 +210,11 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
       }
 
       const qtyHeld = Number(holding.quantity);
-      if (body.quantitySold > qtyHeld + 1e-12) {
-        const err = new Error("QTY_TOO_LARGE");
-        throw err;
-      }
+      const planned = planCashOutHoldingUpdate({
+        quantityHeld: qtyHeld,
+        costBasisMinor: holding.costBasisMinor,
+        quantitySold: body.quantitySold,
+      });
 
       let cat = await tx.category.findFirst({
         where: {
@@ -233,12 +241,7 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
         throw err;
       }
 
-      const costBasis = holding.costBasisMinor;
-      const costRemoved = Math.round(
-        costBasis * (body.quantitySold / qtyHeld)
-      );
-      const newCost = Math.max(0, costBasis - costRemoved);
-      const newQty = qtyHeld - body.quantitySold;
+      const { newCost, newQty, shouldClose } = planned;
 
       const income = await tx.transaction.create({
         data: {
@@ -266,7 +269,7 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
         },
       });
 
-      if (newQty < 1e-12 || newCost <= 0) {
+      if (shouldClose) {
         await tx.holding.update({
           where: { id: holding.id },
           data: {
