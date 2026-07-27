@@ -7,6 +7,11 @@ const {
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  BuyRevokeAfterCashOutError,
+  assertInvestmentBuyRevokeSafe,
+  shouldCloseHoldingAfterBuyRevoke,
+} = require("../lib/investmentBuyRevoke");
 
 /**
  * @param {string} accountId
@@ -730,6 +735,13 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
         existing.instrumentId &&
         existing.amountMinor > 0
       ) {
+        // Cash-outs (and later rebuys) mean the original lot qty is no longer
+        // fully present in the holding; subtracting it would wipe unrelated shares.
+        await assertInvestmentBuyRevokeSafe(tx, {
+          accountId,
+          instrumentId: existing.instrumentId,
+        });
+
         const h = await tx.holding.findFirst({
           where: {
             accountId,
@@ -755,7 +767,7 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
           const newCost = Math.max(0, costHeld - costDec);
           const newQty = Math.max(0, qtyHeld - qtyDec);
 
-          if (newQty < 1e-12 || newCost <= 0) {
+          if (shouldCloseHoldingAfterBuyRevoke({ newQty, newCost })) {
             await tx.holding.update({
               where: { id: h.id },
               data: {
@@ -816,6 +828,12 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
       },
     });
   } catch (err) {
+    if (err instanceof BuyRevokeAfterCashOutError) {
+      return res.status(err.statusCode).json({
+        code: err.code,
+        error: err.message,
+      });
+    }
     next(err);
   }
 });
