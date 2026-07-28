@@ -3,6 +3,7 @@ const { z } = require("zod");
 const { randomUUID } = require("crypto");
 
 const { prisma } = require("../prisma");
+const { destinationAmountMinor } = require("../lib/transferFx");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { ensureTransferCategories } = require("../services/ensureTransferCategories");
@@ -704,9 +705,19 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
       return res.status(400).json({ error: "toWalletId is only valid when destination has wallets enabled" });
     }
 
-    const toAmountMinor = sameCurrency
-      ? body.amountMinor
-      : Math.round(body.amountMinor * fxRate);
+    let toAmountMinor;
+    try {
+      toAmountMinor = destinationAmountMinor({
+        amountMinor: body.amountMinor,
+        fxRate,
+        sameCurrency,
+      });
+    } catch (err) {
+      if (err && err.code === "FX_AMOUNT_ROUNDS_TO_ZERO") {
+        return res.status(400).json({ error: err.message });
+      }
+      throw err;
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       await throwIfExpenseWouldCauseNegativeCashBalance(

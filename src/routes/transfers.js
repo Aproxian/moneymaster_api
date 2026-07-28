@@ -2,6 +2,7 @@ const { Router } = require("express");
 const { z } = require("zod");
 
 const { prisma } = require("../prisma");
+const { destinationAmountMinor } = require("../lib/transferFx");
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
@@ -149,6 +150,20 @@ transfersRouter.post("/", async (req, res, next) => {
       if (!w) return res.status(400).json({ error: "Invalid toWalletId" });
     }
 
+    let toAmountMinor;
+    try {
+      toAmountMinor = destinationAmountMinor({
+        amountMinor: body.amountMinor,
+        fxRate,
+        sameCurrency,
+      });
+    } catch (err) {
+      if (err && err.code === "FX_AMOUNT_ROUNDS_TO_ZERO") {
+        return res.status(400).json({ error: err.message });
+      }
+      throw err;
+    }
+
     const result = await prisma.$transaction(async (tx) => {
       await throwIfExpenseWouldCauseNegativeCashBalance(
         tx,
@@ -156,10 +171,6 @@ transfersRouter.post("/", async (req, res, next) => {
         body.amountMinor,
         body.fromWalletId ?? null
       );
-
-      const toAmountMinor = sameCurrency
-        ? body.amountMinor
-        : Math.round(body.amountMinor * fxRate);
 
       const transferGroup = await tx.transferGroup.create({
         data: {
