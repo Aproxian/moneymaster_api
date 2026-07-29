@@ -26,6 +26,10 @@ const {
   countActiveAccountMemberships,
 } = require("../lib/accountLimits");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
+const {
+  CurrencyChangeConflictError,
+  lockAccountCurrencyForUpdate,
+} = require("../lib/claimCurrencyChange");
 
 const accountsRouter = Router();
 
@@ -1122,14 +1126,22 @@ accountsRouter.post(
       }
 
       const { newCurrency, fxRate } = body;
+      const oldCurrency = account.currency;
 
       const result = await prisma.$transaction(async (tx) => {
-        const oldCurrency = account.currency;
+        // Serialize converters: concurrent / retried change-currency must not
+        // multiply amountMinor by fxRate more than once.
+        await lockAccountCurrencyForUpdate(tx, {
+          accountId: account.id,
+          expectedCurrency: oldCurrency,
+        });
 
         const txns = await tx.transaction.findMany({
           where: {
             accountId: account.id,
             deletedAt: null,
+            // Defense in depth: skip rows already stamped in the target currency.
+            currency: oldCurrency,
           },
           select: {
             id: true,
@@ -1193,6 +1205,15 @@ accountsRouter.post(
 
       return res.status(200).json(result);
     } catch (err) {
+      if (err instanceof CurrencyChangeConflictError || err?.code === "currency_change_conflict") {
+        return res.status(409).json({
+          code: "currency_change_conflict",
+          error: err.message,
+        });
+      }
+      if (err?.statusCode === 404) {
+        return res.status(404).json({ error: err.message || "Account not found" });
+      }
       next(err);
     }
   }
