@@ -18,6 +18,7 @@ const {
   getPrimaryOwnerUserId,
   syncNewMemberCategoryAccess,
   sortMembersForLockUi,
+  reassignCategoriesCreatedByFormerOwner,
 } = require("../services/categoryMemberAccess");
 const {
   MAX_ACCOUNTS_PER_USER,
@@ -501,6 +502,11 @@ accountsRouter.post(
         await tx.accountMember.update({
           where: { userId_accountId: { userId: body.newOwnerUserId, accountId } },
           data: { role: "OWNER" },
+        });
+        await reassignCategoriesCreatedByFormerOwner(tx, {
+          accountId,
+          fromUserId: userId,
+          toUserId: body.newOwnerUserId,
         });
       });
 

@@ -50,6 +50,25 @@ function canConfigureCategoryMemberAccess({ isPersonal, category, primaryOwnerUs
   return category.createdByUserId === userId;
 }
 
+/**
+ * Seed/default and owner-created categories are stamped with the then-owner's user id and
+ * treated as master-owned while that user remains primary owner. Ownership transfer (and
+ * account-delete succession) must reassign those creators; otherwise the demoted former
+ * owner keeps lock-admin on every seeded category and the new OWNER cannot configure them.
+ *
+ * @param {import('@prisma/client').PrismaClient | import('@prisma/client').Prisma.TransactionClient} client
+ * @param {{ accountId: string; fromUserId: string; toUserId: string }} args
+ */
+async function reassignCategoriesCreatedByFormerOwner(client, { accountId, fromUserId, toUserId }) {
+  if (!accountId || !fromUserId || !toUserId || fromUserId === toUserId) {
+    return { count: 0 };
+  }
+  return client.category.updateMany({
+    where: { accountId, createdByUserId: fromUserId },
+    data: { createdByUserId: toUserId },
+  });
+}
+
 function computeManualEntryAllowedForMe({
   category,
   isPersonal,
@@ -238,6 +257,7 @@ module.exports = {
   accountIsPersonalForUser,
   isMasterOwnedCategory,
   canConfigureCategoryMemberAccess,
+  reassignCategoriesCreatedByFormerOwner,
   computeManualEntryAllowedForMe,
   assertCategoryManualMemberAccess,
   syncNewMemberCategoryAccess,

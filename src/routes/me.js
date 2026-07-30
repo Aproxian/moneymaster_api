@@ -8,7 +8,10 @@ const { isAdminUserEmail } = require("../lib/adminUser");
 const { processPendingSchedulesForUser } = require("../services/processPendingSchedules");
 const { getMaintenanceState, setMaintenanceState } = require("../services/globalAppState");
 const { logApp } = require("../lib/fileLogger");
-const { syncNewMemberCategoryAccess } = require("../services/categoryMemberAccess");
+const {
+  syncNewMemberCategoryAccess,
+  reassignCategoriesCreatedByFormerOwner,
+} = require("../services/categoryMemberAccess");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
 const {
   MAX_ACCOUNTS_PER_USER,
@@ -497,6 +500,11 @@ meRouter.delete("/me", requireAuth, async (req, res, next) => {
               userId_accountId: { userId: successor.userId, accountId },
             },
             data: { role: "OWNER" },
+          });
+          await reassignCategoriesCreatedByFormerOwner(tx, {
+            accountId,
+            fromUserId: userId,
+            toUserId: successor.userId,
           });
         }
 
