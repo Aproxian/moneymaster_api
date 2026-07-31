@@ -35,12 +35,12 @@ const investmentsRouter = Router();
 
 const TWELVEDATA_STATE_ID = "TWELVEDATA";
 const YAHOO_STATE_ID = "YAHOOFINANCE";
+const DEFAULT_QUOTE_CACHE_KEEP_PER_INSTRUMENT = 30;
 
 /**
- * Which provider is currently active for the automated daily sweep.
+ * Which provider is currently active for the default automated daily sweep.
  * Change QUOTE_ACTIVE_PROVIDER in your .env and restart to switch.
- * Does not affect the dedicated /refresh-daily or /refresh-daily-yahoo endpoints
- * (those always use their respective provider regardless of this value).
+ * /refresh-daily follows this value; /refresh-daily-yahoo remains a Yahoo-specific endpoint.
  */
 const ACTIVE_QUOTE_PROVIDER =
   (process.env.QUOTE_ACTIVE_PROVIDER ?? "TWELVEDATA").trim().toUpperCase();
@@ -109,6 +109,10 @@ investmentsRouter.post("/refresh-daily", refreshDailyAuth, async (req, res, next
       body.cancelBackgroundSweep === true ||
       body.cancelBackgroundSweep === "true" ||
       body.cancelBackgroundSweep === 1;
+
+    if (ACTIVE_QUOTE_PROVIDER === YAHOO_STATE_ID) {
+      return handleYahooFinanceRefreshDaily(req, res, next);
+    }
 
     if (rejectCronNonSweepBody(req, res, backgroundSweep, cancelBackgroundSweep)) {
       return;
@@ -267,7 +271,7 @@ investmentsRouter.get("/yahoo-finance-sweep-status", refreshDailyAuth, async (re
   }
 });
 
-investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res, next) => {
+async function handleYahooFinanceRefreshDaily(req, res, next) {
   try {
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const resetCycle =
@@ -416,14 +420,16 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
   } catch (err) {
     next(err);
   }
-});
+}
+
+investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, handleYahooFinanceRefreshDaily);
 
 /**
- * Trim `QuoteCache` to the newest N rows (by createdAt, then asOf, then id).
+ * Trim `QuoteCache` to the newest N rows per instrument (by createdAt, then asOf, then id).
  * Auth: same as POST /investments/refresh-daily (cron header + secret or admin JWT).
  *
- * Query or JSON body: `keepMostRecentCount` (optional). When omitted, defaults to the number of rows
- * in `Instrument` (total instrument count).
+ * Query or JSON body: `keepMostRecentCount` (optional). When omitted, keeps enough history for
+ * the instrument summary quote-history response.
  */
 investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, next) => {
   try {
@@ -442,7 +448,7 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
 
     let keepMostRecentCount;
     if (raw === undefined || raw === null || raw === "") {
-      keepMostRecentCount = await prisma.instrument.count();
+      keepMostRecentCount = DEFAULT_QUOTE_CACHE_KEEP_PER_INSTRUMENT;
     } else {
       const n = parseInt(String(raw), 10);
       if (!Number.isFinite(n) || n < 0) {
@@ -480,7 +486,17 @@ investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, n
       DELETE q FROM QuoteCache q
       LEFT JOIN (
         SELECT id FROM (
-          SELECT id FROM QuoteCache ORDER BY createdAt DESC, asOf DESC, id DESC LIMIT ${keepMostRecentCount}
+          SELECT id
+          FROM (
+            SELECT
+              id,
+              ROW_NUMBER() OVER (
+                PARTITION BY instrumentId
+                ORDER BY createdAt DESC, asOf DESC, id DESC
+              ) AS rn
+            FROM QuoteCache
+          ) ranked
+          WHERE rn <= ${keepMostRecentCount}
         ) inner_keep
       ) k ON q.id = k.id
       WHERE k.id IS NULL

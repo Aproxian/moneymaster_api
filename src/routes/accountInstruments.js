@@ -36,7 +36,7 @@ accountInstrumentsRouter.get("/:instrumentId/summary", async (req, res, next) =>
     }
 
     const instrument = await prisma.instrument.findFirst({
-      where: { id: instrumentId, isActive: true },
+      where: { id: instrumentId },
       select: {
         id: true,
         provider: true,

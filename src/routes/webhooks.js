@@ -13,6 +13,10 @@ const {
 
 const webhooksRouter = Router();
 
+function isUniqueConstraintError(err) {
+  return err?.code === "P2002";
+}
+
 /** RevenueCat sets a fixed Authorization header value; accept it with or without a "Bearer " prefix. */
 function isAuthorized(req, secret) {
   const header = req.get("authorization")?.trim();
@@ -51,43 +55,75 @@ webhooksRouter.post("/revenuecat", async (req, res, next) => {
     const type = String(event.type || "UNKNOWN").toUpperCase();
     const appUserId = typeof event.app_user_id === "string" ? event.app_user_id : null;
 
-    // Idempotency: RevenueCat retries deliveries. Record-first; a duplicate id short-circuits.
+    // Idempotency: RevenueCat retries deliveries. For events that mutate users, record the event
+    // in the same transaction as the mutation so a transient write failure remains retryable.
     const already = await prisma.revenueCatEvent.findUnique({ where: { id: eventId } });
     if (already) {
       return res.json({ ok: true, deduped: true });
     }
-    await prisma.revenueCatEvent
-      .create({ data: { id: eventId, userId: appUserId, type } })
-      .catch(() => {
-        /* race on retry: another delivery inserted it first — proceed harmlessly */
-      });
 
     // Only `full_access` events and identified (non-anonymous) users change premium state.
     const anonymous = !appUserId || appUserId.startsWith("$RCAnonymousID:");
     if (anonymous || !concernsFullAccess(event)) {
+      try {
+        await prisma.revenueCatEvent.create({ data: { id: eventId, userId: appUserId, type } });
+      } catch (err) {
+        if (isUniqueConstraintError(err)) {
+          return res.json({ ok: true, deduped: true });
+        }
+        throw err;
+      }
       return res.json({ ok: true, applied: false, reason: "no_matching_user_or_entitlement" });
     }
 
     const state = computePremiumStateFromEvent(event);
     if (state.active === null) {
       // Indeterminate (TEST/TRANSFER/unknown): acknowledge without mutating the user.
+      try {
+        await prisma.revenueCatEvent.create({ data: { id: eventId, userId: appUserId, type } });
+      } catch (err) {
+        if (isUniqueConstraintError(err)) {
+          return res.json({ ok: true, deduped: true });
+        }
+        throw err;
+      }
       return res.json({ ok: true, applied: false, reason: "indeterminate", type });
     }
 
-    const updated = await prisma.user.updateMany({
-      where: { id: appUserId },
-      data: {
-        premiumActive: state.active,
-        premiumProductId: state.productId,
-        premiumStore: state.store,
-        premiumPeriodType: state.periodType,
-        premiumExpiresAt: state.expiresAt,
-        premiumWillRenew: state.willRenew,
-        premiumIsLifetime: state.isLifetime,
-        premiumUpdatedAt: new Date(),
-        revenueCatCustomerId: appUserId,
-      },
-    });
+    let updated;
+    try {
+      updated = await prisma.$transaction(async (tx) => {
+        const duplicate = await tx.revenueCatEvent.findUnique({ where: { id: eventId } });
+        if (duplicate) return { count: null, deduped: true };
+
+        const userUpdate = await tx.user.updateMany({
+          where: { id: appUserId },
+          data: {
+            premiumActive: state.active,
+            premiumProductId: state.productId,
+            premiumStore: state.store,
+            premiumPeriodType: state.periodType,
+            premiumExpiresAt: state.expiresAt,
+            premiumWillRenew: state.willRenew,
+            premiumIsLifetime: state.isLifetime,
+            premiumUpdatedAt: new Date(),
+            revenueCatCustomerId: appUserId,
+          },
+        });
+
+        await tx.revenueCatEvent.create({ data: { id: eventId, userId: appUserId, type } });
+        return { count: userUpdate.count, deduped: false };
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        return res.json({ ok: true, deduped: true });
+      }
+      throw err;
+    }
+
+    if (updated.deduped) {
+      return res.json({ ok: true, deduped: true });
+    }
 
     logApp("INFO", "RevenueCat", "webhook applied", {
       type,
