@@ -26,6 +26,7 @@ const {
   countActiveAccountMemberships,
 } = require("../lib/accountLimits");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
+const { stripWalletIdsFromPendingSchedules } = require("../lib/schedulePayloads");
 
 const accountsRouter = Router();
 
@@ -661,6 +662,9 @@ accountsRouter.patch(
               where: { accountId, deletedAt: null },
               data: { deletedAt: new Date() },
             });
+            // Pending schedules keep payload.walletId in JSON; materialize rejects
+            // WALLET_NOT_ALLOWED once wallets are off and never advances the row.
+            await stripWalletIdsFromPendingSchedules(tx, accountId);
             await tx.account.update({
               where: { id: accountId },
               data: { walletMigrationPending: false, walletsEnabled: false },
@@ -789,6 +793,9 @@ accountsRouter.patch(
             where: { accountId, deletedAt: null },
             data: { deletedAt: new Date() },
           });
+          // Same class as cancelWalletMigration: clear stale walletIds so due
+          // schedules can still materialize after wallets are turned off.
+          await stripWalletIdsFromPendingSchedules(tx, accountId);
         }
 
         if (body.walletsEnabled === true && !existing.walletsEnabled) {

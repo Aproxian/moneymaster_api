@@ -95,10 +95,18 @@ scheduledTransactionsRouter.post("/", async (req, res, next) => {
     if (payload.tab === "invest" && !account.investingEnabled) {
       return res.status(400).json({ error: "Investing is disabled for this account" });
     }
-    if (account.walletsEnabled && !payload.walletId) {
-      return res.status(400).json({ error: "walletId is required when this account uses wallets" });
-    }
-    if (!account.walletsEnabled && payload.walletId) {
+    if (account.walletsEnabled) {
+      if (!payload.walletId) {
+        return res.status(400).json({ error: "walletId is required when this account uses wallets" });
+      }
+      const wallet = await prisma.accountWallet.findFirst({
+        where: { id: payload.walletId, accountId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!wallet) {
+        return res.status(400).json({ error: "Invalid walletId for this account" });
+      }
+    } else if (payload.walletId) {
       return res.status(400).json({ error: "walletId is not used when wallets are disabled" });
     }
 

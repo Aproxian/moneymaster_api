@@ -11,6 +11,8 @@ const { walletBalanceMinor } = require("../services/walletBalance");
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
+const { lockOpenWalletForUpdate } = require("../lib/lockWallet");
+const { countPendingSchedulesForWallet } = require("../lib/schedulePayloads");
 
 const accountExtrasRouter = Router({ mergeParams: true });
 
@@ -234,24 +236,56 @@ accountExtrasRouter.delete("/wallets/:walletId", async (req, res, next) => {
     const { accountId, walletId } = req.params;
     const userId = req.auth.userId;
 
-    const existing = await prisma.accountWallet.findFirst({
-      where: { id: walletId, accountId, deletedAt: null },
-      select: { id: true },
-    });
-    if (!existing) return res.status(404).json({ error: "Wallet not found" });
-
-    const bal = await walletBalanceMinor(prisma, walletId);
-    if (bal !== 0) {
-      return res.status(400).json({
-        error: "Wallet balance must be zero before it can be deleted",
-        balanceMinor: bal,
+    const pendingScheduleCount = await countPendingSchedulesForWallet(
+      prisma,
+      accountId,
+      walletId
+    );
+    if (pendingScheduleCount > 0) {
+      const noun = pendingScheduleCount === 1 ? "schedule" : "schedules";
+      const human = `This wallet is still used by ${pendingScheduleCount} pending ${noun}. Cancel or reassign those scheduled entries first; then you can delete this wallet.`;
+      return res.status(409).json({
+        code: "wallet_has_pending_schedules",
+        error: human,
+        message: human,
+        pendingScheduleCount,
       });
     }
 
-    await prisma.accountWallet.update({
-      where: { id: walletId },
-      data: { deletedAt: new Date() },
-    });
+    try {
+      await prisma.$transaction(async (tx) => {
+        const locked = await lockOpenWalletForUpdate(tx, { walletId, accountId });
+        if (!locked) {
+          const err = new Error("WALLET_NOT_FOUND");
+          err.statusCode = 404;
+          throw err;
+        }
+
+        const bal = await walletBalanceMinor(tx, walletId);
+        if (bal !== 0) {
+          const err = new Error("WALLET_BALANCE_NONEMPTY");
+          err.statusCode = 400;
+          err.balanceMinor = bal;
+          throw err;
+        }
+
+        await tx.accountWallet.update({
+          where: { id: walletId },
+          data: { deletedAt: new Date() },
+        });
+      });
+    } catch (e) {
+      if (e && e.statusCode === 404) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (e && e.message === "WALLET_BALANCE_NONEMPTY") {
+        return res.status(400).json({
+          error: "Wallet balance must be zero before it can be deleted",
+          balanceMinor: e.balanceMinor,
+        });
+      }
+      throw e;
+    }
 
     await prisma.auditLog.create({
       data: {
