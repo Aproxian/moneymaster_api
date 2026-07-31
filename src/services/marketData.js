@@ -139,9 +139,23 @@ async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
       where: { provider: "TWELVEDATA", isActive: true },
       select: { id: true, providerSymbol: true },
     });
-    const ids = rows
-      .filter((r) => want.has(sanitizeTwelveDataSymbol(r.providerSymbol).toUpperCase()))
-      .map((r) => r.id);
+    const ids = [];
+    const ambiguousTickers = [];
+    for (const ticker of want) {
+      const matches = rows.filter(
+        (r) => sanitizeTwelveDataSymbol(r.providerSymbol).toUpperCase() === ticker
+      );
+      if (matches.length === 1) {
+        ids.push(matches[0].id);
+      } else if (matches.length > 1) {
+        ambiguousTickers.push(ticker);
+      }
+    }
+    if (ambiguousTickers.length > 0) {
+      logApp("WARN", "TwelveData", "skipped_ambiguous_plan_restricted_symbols", {
+        tickers: ambiguousTickers,
+      });
+    }
     if (ids.length === 0) return;
     const res = await prisma.instrument.updateMany({
       where: { id: { in: ids } },

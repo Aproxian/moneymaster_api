@@ -146,6 +146,7 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
           createdByUserId: userId,
           instrumentId: instrument.id,
           investmentQuantity: body.quantity,
+          investmentCostBasisMinor: body.amountMinor,
           walletId,
         },
         select: {
