@@ -148,6 +148,7 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
         categoryId: category.id,
         quantity: { increment: quantity },
         costBasisMinor: { increment: amountMinor },
+        deletedAt: null,
       },
       create: {
         accountId,

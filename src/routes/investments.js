@@ -80,8 +80,7 @@ function rejectCronNonSweepBody(req, res, backgroundSweep, cancelBackgroundSweep
 /** Poll while a background sweep runs (same auth as POST /refresh-daily: JWT admin or cron header). */
 investmentsRouter.get("/twelve-data-sweep-status", refreshDailyAuth, async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
+    if (!req.refreshDailyCron) {
       const user = await assertAdmin(req, res);
       if (!user) return;
     }
@@ -114,8 +113,7 @@ investmentsRouter.post("/refresh-daily", refreshDailyAuth, async (req, res, next
       return;
     }
 
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
+    if (!req.refreshDailyCron) {
       const user = await assertAdmin(req, res);
       if (!user) return;
     }
@@ -250,8 +248,7 @@ investmentsRouter.post("/refresh-daily", refreshDailyAuth, async (req, res, next
 /** Poll while a Yahoo Finance background sweep runs (same auth as POST /refresh-daily-yahoo). */
 investmentsRouter.get("/yahoo-finance-sweep-status", refreshDailyAuth, async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
+    if (!req.refreshDailyCron) {
       const user = await assertAdmin(req, res);
       if (!user) return;
     }
@@ -285,8 +282,7 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
       return;
     }
 
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
+    if (!req.refreshDailyCron) {
       const user = await assertAdmin(req, res);
       if (!user) return;
     }
@@ -427,8 +423,7 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
  */
 investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
+    if (!req.refreshDailyCron) {
       const user = await assertAdmin(req, res);
       if (!user) return;
     }
