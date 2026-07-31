@@ -29,6 +29,12 @@ const GRANT_TYPES = new Set([
   "TEMPORARY_ENTITLEMENT_GRANT",
 ]);
 
+function isCustomerSupportCancellation(event, type) {
+  if (type !== "CANCELLATION") return false;
+  const reason = String(event?.cancel_reason || event?.cancellation_reason || "").toUpperCase();
+  return reason === "CUSTOMER_SUPPORT" || reason === "DEVELOPER_INITIATED";
+}
+
 /**
  * @param {Record<string, any>} event RevenueCat webhook `event` object.
  * @returns {boolean} whether the event concerns the `full_access` entitlement.
@@ -68,7 +74,7 @@ function computePremiumStateFromEvent(event) {
     productId === PRODUCT_ID_LIFETIME || type === "NON_RENEWING_PURCHASE";
 
   let active;
-  if (REVOKE_TYPES.has(type)) {
+  if (REVOKE_TYPES.has(type) || isCustomerSupportCancellation(event, type)) {
     active = false;
   } else if (isLifetime) {
     active = true;
@@ -97,13 +103,52 @@ function computePremiumStateFromEvent(event) {
 
   return {
     active,
-    isLifetime,
+    isLifetime: active === true && isLifetime,
     productId,
     store,
     periodType,
     expiresAt: isLifetime ? null : expMs != null ? new Date(expMs) : null,
     willRenew,
   };
+}
+
+/**
+ * RevenueCat sends product-level events. Do not let stale revocations for old subscriptions
+ * overwrite a newer lifetime purchase or a later active subscription expiry.
+ *
+ * @param {{ premiumActive?: boolean, premiumIsLifetime?: boolean, premiumExpiresAt?: Date | string | null } | null} existingUser
+ * @param {{ active: boolean | null, isLifetime: boolean, productId: string | null, expiresAt: Date | null }} state
+ * @returns {boolean}
+ */
+function shouldApplyPremiumStateFromEvent(existingUser, state) {
+  if (!existingUser) return true;
+
+  if (
+    existingUser.premiumIsLifetime &&
+    !state.isLifetime &&
+    !(state.active === false && state.productId === PRODUCT_ID_LIFETIME)
+  ) {
+    return false;
+  }
+
+  const existingExpiryMs =
+    existingUser.premiumExpiresAt instanceof Date
+      ? existingUser.premiumExpiresAt.getTime()
+      : existingUser.premiumExpiresAt
+        ? new Date(existingUser.premiumExpiresAt).getTime()
+        : null;
+  const incomingExpiryMs = state.expiresAt instanceof Date ? state.expiresAt.getTime() : null;
+
+  if (
+    existingUser.premiumActive &&
+    Number.isFinite(existingExpiryMs) &&
+    Number.isFinite(incomingExpiryMs) &&
+    existingExpiryMs > incomingExpiryMs
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 module.exports = {
@@ -113,4 +158,5 @@ module.exports = {
   getWebhookAuthSecret,
   concernsFullAccess,
   computePremiumStateFromEvent,
+  shouldApplyPremiumStateFromEvent,
 };
