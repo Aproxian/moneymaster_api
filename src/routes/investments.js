@@ -427,8 +427,7 @@ investmentsRouter.post("/refresh-daily-yahoo", refreshDailyAuth, async (req, res
  */
 investmentsRouter.post("/quote-cache/trim", refreshDailyAuth, async (req, res, next) => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL?.trim();
-    if (!req.refreshDailyCron && adminEmail) {
+    if (!req.refreshDailyCron) {
       const user = await assertAdmin(req, res);
       if (!user) return;
     }
