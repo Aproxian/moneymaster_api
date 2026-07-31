@@ -16,7 +16,7 @@ function getWebhookAuthSecret() {
 }
 
 /** Event types that immediately revoke access. */
-const REVOKE_TYPES = new Set(["EXPIRATION", "SUBSCRIPTION_PAUSED"]);
+const REVOKE_TYPES = new Set(["EXPIRATION"]);
 
 /** Event types that grant access (subject to expiry for subscriptions). */
 const GRANT_TYPES = new Set([
@@ -59,6 +59,7 @@ function concernsFullAccess(event) {
 function computePremiumStateFromEvent(event) {
   const type = String(event?.type || "").toUpperCase();
   const productId = event?.product_id ?? null;
+  const cancelReason = String(event?.cancel_reason || "").toUpperCase();
   const store = event?.store ?? null;
   const periodType = event?.period_type ?? null;
   const expMs =
@@ -66,9 +67,14 @@ function computePremiumStateFromEvent(event) {
 
   const isLifetime =
     productId === PRODUCT_ID_LIFETIME || type === "NON_RENEWING_PURCHASE";
+  const isRefundCancellation =
+    type === "CANCELLATION" &&
+    (productId === PRODUCT_ID_LIFETIME ||
+      cancelReason === "CUSTOMER_SUPPORT" ||
+      cancelReason === "DEVELOPER_INITIATED");
 
   let active;
-  if (REVOKE_TYPES.has(type)) {
+  if (REVOKE_TYPES.has(type) || isRefundCancellation) {
     active = false;
   } else if (isLifetime) {
     active = true;
@@ -97,7 +103,7 @@ function computePremiumStateFromEvent(event) {
 
   return {
     active,
-    isLifetime,
+    isLifetime: isLifetime && active === true,
     productId,
     store,
     periodType,
