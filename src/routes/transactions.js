@@ -7,6 +7,10 @@ const {
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  lockOpenHoldingForUpdate,
+  planBuyRevokeHoldingUpdate,
+} = require("../lib/lockHolding");
 
 /**
  * @param {string} accountId
@@ -730,32 +734,22 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
         existing.instrumentId &&
         existing.amountMinor > 0
       ) {
-        const h = await tx.holding.findFirst({
-          where: {
-            accountId,
-            instrumentId: existing.instrumentId,
-            deletedAt: null,
-          },
+        // Serialize against concurrent buys (relative increments) so an
+        // absolute remaining write cannot overwrite a newer lot.
+        const h = await lockOpenHoldingForUpdate(tx, {
+          accountId,
+          instrumentId: existing.instrumentId,
         });
 
         if (h) {
-          const qtyHeld = Number(h.quantity);
-          const costHeld = h.costBasisMinor;
-          let qtyDec =
-            existing.investmentQuantity != null
-              ? Number(existing.investmentQuantity)
-              : costHeld > 0
-                ? qtyHeld * (existing.amountMinor / costHeld)
-                : 0;
+          const planned = planBuyRevokeHoldingUpdate({
+            quantityHeld: Number(h.quantity),
+            costBasisMinor: h.costBasisMinor,
+            investmentQuantity: existing.investmentQuantity,
+            amountMinor: existing.amountMinor,
+          });
 
-          if (!Number.isFinite(qtyDec) || qtyDec < 0) qtyDec = 0;
-          if (qtyDec > qtyHeld) qtyDec = qtyHeld;
-
-          const costDec = Math.min(existing.amountMinor, costHeld);
-          const newCost = Math.max(0, costHeld - costDec);
-          const newQty = Math.max(0, qtyHeld - qtyDec);
-
-          if (newQty < 1e-12 || newCost <= 0) {
+          if (planned.shouldClose) {
             await tx.holding.update({
               where: { id: h.id },
               data: {
@@ -768,8 +762,8 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
             await tx.holding.update({
               where: { id: h.id },
               data: {
-                quantity: newQty,
-                costBasisMinor: newCost,
+                quantity: planned.newQty,
+                costBasisMinor: planned.newCost,
               },
             });
           }
