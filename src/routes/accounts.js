@@ -26,6 +26,7 @@ const {
   countActiveAccountMemberships,
 } = require("../lib/accountLimits");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
+const { cancelPendingInvestSchedules } = require("../lib/schedulePayloads");
 
 const accountsRouter = Router();
 
@@ -773,6 +774,10 @@ accountsRouter.patch(
         });
 
         if (body.investingEnabled === false && existing.investingEnabled) {
+          // Invest schedules cannot materialize while investing is off (and
+          // categories are removed). Cancel them so they do not stick PENDING
+          // forever or burst-catch-up after investing is turned back on.
+          await cancelPendingInvestSchedules(tx, accountId);
           await removeInvestmentCategories(tx, accountId);
         }
         if (body.investingEnabled === true && !existing.investingEnabled) {
