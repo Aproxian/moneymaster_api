@@ -2,6 +2,7 @@ const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("./nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("./categoryMemberAccess");
+const { lockAccountInvestingForUpdate } = require("../lib/lockAccountInvesting");
 
 /**
  * Creates a ledger row from a stored schedule payload (same rules as manual POST routes).
@@ -92,7 +93,12 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
   }
 
   if (tab === "invest") {
-    if (!account.investingEnabled) throw new Error("INVESTING_OFF");
+    // Lock before buy so investing disable cannot pass its holdings check while
+    // this materialization still opens a holding afterward.
+    const locked = await lockAccountInvestingForUpdate(tx, accountId);
+    if (!locked) throw new Error("NO_ACCOUNT");
+    if (!locked.investingEnabled) throw new Error("INVESTING_OFF");
+
     const instrumentId = typeof payload.instrumentId === "string" ? payload.instrumentId : null;
     const quantity = Number(payload.quantity);
     if (!instrumentId || !Number.isFinite(quantity) || quantity <= 0) {
@@ -125,7 +131,7 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
         accountId,
         type: "INVESTMENT",
         amountMinor,
-        currency: account.currency,
+        currency: locked.currency,
         occurredAt,
         note,
         categoryId: category.id,

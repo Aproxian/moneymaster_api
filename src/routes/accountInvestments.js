@@ -6,6 +6,10 @@ const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  assertInvestingEnabledLocked,
+  InvestingDisabledError,
+} = require("../lib/lockAccountInvesting");
 
 // Mounted at /accounts/:accountId/investments
 const accountInvestmentsRouter = Router({ mergeParams: true });
@@ -134,12 +138,16 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
     if (!occurredAt) occurredAt = new Date();
 
     const result = await prisma.$transaction(async (tx) => {
+      // Serialize against investing disable: re-check under Account FOR UPDATE
+      // so we cannot open a holding after investingEnabled flips to false.
+      const locked = await assertInvestingEnabledLocked(tx, accountId);
+
       const txRow = await tx.transaction.create({
         data: {
           accountId,
           type: "INVESTMENT",
           amountMinor: body.amountMinor,
-          currency: account.currency,
+          currency: locked.currency,
           occurredAt,
           note: body.note ?? null,
           categoryId: category.id,
@@ -220,6 +228,12 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
 
     return res.status(201).json(result);
   } catch (err) {
+    if (err instanceof InvestingDisabledError) {
+      return res.status(403).json({ error: err.message });
+    }
+    if (err && err.statusCode === 404) {
+      return res.status(404).json({ error: err.message });
+    }
     next(err);
   }
 });
