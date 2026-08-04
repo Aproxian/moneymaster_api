@@ -26,6 +26,10 @@ const {
   countActiveAccountMemberships,
 } = require("../lib/accountLimits");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
+const {
+  assertCanDisableInvestingLocked,
+  OpenHoldingsDisableError,
+} = require("../lib/lockAccountInvesting");
 
 const accountsRouter = Router();
 
@@ -767,12 +771,20 @@ accountsRouter.patch(
       }
 
       await prisma.$transaction(async (tx) => {
+        // Re-check under account row lock so a concurrent buy cannot open a
+        // holding after the pre-transaction holdings scan above.
+        let disablingInvesting = false;
+        if (body.investingEnabled === false) {
+          const locked = await assertCanDisableInvestingLocked(tx, accountId);
+          disablingInvesting = !locked.alreadyDisabled;
+        }
+
         await tx.account.update({
           where: { id: accountId },
           data,
         });
 
-        if (body.investingEnabled === false && existing.investingEnabled) {
+        if (disablingInvesting) {
           await removeInvestmentCategories(tx, accountId);
         }
         if (body.investingEnabled === true && !existing.investingEnabled) {
@@ -800,6 +812,12 @@ accountsRouter.patch(
       if (!payload) return res.status(404).json({ error: "Account not found" });
       return res.json(payload);
     } catch (err) {
+      if (err instanceof OpenHoldingsDisableError) {
+        return res.status(400).json({ error: err.message });
+      }
+      if (err && err.statusCode === 404) {
+        return res.status(404).json({ error: err.message });
+      }
       next(err);
     }
   }
