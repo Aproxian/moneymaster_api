@@ -7,6 +7,10 @@ const {
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  AccountCurrencyChangedError,
+  assertAccountCurrencyLocked,
+} = require("../lib/lockAccountCurrency");
 
 /**
  * @param {string} accountId
@@ -587,30 +591,37 @@ transactionsRouter.post("/", async (req, res, next) => {
       }
     }
 
-    const tx = await prisma.transaction.create({
-      data: {
-        accountId,
-        type: body.type,
-        amountMinor: body.amountMinor,
-        currency,
-        occurredAt,
-        note: body.note ?? null,
-        categoryId: body.categoryId,
-        createdByUserId: userId,
-        walletId,
-      },
-      select: {
-        id: true,
-        type: true,
-        amountMinor: true,
-        currency: true,
-        occurredAt: true,
-        note: true,
-        categoryId: true,
-        walletId: true,
-        revokedAt: true,
-        createdAt: true,
-      },
+    // Serialize vs change-currency: amountMinor is in the pre-read currency
+    // scale. If Account.currency flipped under us, fail closed (409) instead of
+    // inserting an unconverted mixed-currency ledger row.
+    const tx = await prisma.$transaction(async (db) => {
+      await assertAccountCurrencyLocked(db, accountId, currency);
+
+      return db.transaction.create({
+        data: {
+          accountId,
+          type: body.type,
+          amountMinor: body.amountMinor,
+          currency,
+          occurredAt,
+          note: body.note ?? null,
+          categoryId: body.categoryId,
+          createdByUserId: userId,
+          walletId,
+        },
+        select: {
+          id: true,
+          type: true,
+          amountMinor: true,
+          currency: true,
+          occurredAt: true,
+          note: true,
+          categoryId: true,
+          walletId: true,
+          revokedAt: true,
+          createdAt: true,
+        },
+      });
     });
 
     await prisma.auditLog.create({
@@ -630,6 +641,18 @@ transactionsRouter.post("/", async (req, res, next) => {
 
     return res.status(201).json({ transaction: tx });
   } catch (err) {
+    if (
+      err instanceof AccountCurrencyChangedError ||
+      err?.code === "account_currency_changed"
+    ) {
+      return res.status(409).json({
+        code: "account_currency_changed",
+        error: err.message,
+      });
+    }
+    if (err?.statusCode === 404) {
+      return res.status(404).json({ error: err.message || "Account not found" });
+    }
     next(err);
   }
 });
