@@ -7,6 +7,10 @@ const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
 const { getPrimaryOwnerUserId } = require("../services/categoryMemberAccess");
 const { ensureInvestmentCategories } = require("../services/investingCategories");
+const {
+  AccountCurrencyChangedError,
+  assertAccountCurrencyLocked,
+} = require("../lib/lockAccountCurrency");
 
 const accountInstrumentsRouter = Router({ mergeParams: true });
 
@@ -194,6 +198,10 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // Proceeds are priced in the pre-read account currency; do not insert if
+      // change-currency flipped the account under this cash-out.
+      await assertAccountCurrencyLocked(tx, accountId, account.currency);
+
       const holding = await tx.holding.findFirst({
         where: { accountId, instrumentId, deletedAt: null },
       });
@@ -306,6 +314,18 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
 
     return res.status(201).json(result);
   } catch (err) {
+    if (
+      err instanceof AccountCurrencyChangedError ||
+      err?.code === "account_currency_changed"
+    ) {
+      return res.status(409).json({
+        code: "account_currency_changed",
+        error: err.message,
+      });
+    }
+    if (err?.statusCode === 404) {
+      return res.status(404).json({ error: err.message || "Account not found" });
+    }
     if (err.message === "NO_HOLDING") {
       return res.status(400).json({ error: "No open holding for this instrument" });
     }

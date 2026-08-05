@@ -6,6 +6,10 @@ const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  AccountCurrencyChangedError,
+  assertAccountCurrencyLocked,
+} = require("../lib/lockAccountCurrency");
 
 // Mounted at /accounts/:accountId/investments
 const accountInvestmentsRouter = Router({ mergeParams: true });
@@ -134,6 +138,10 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
     if (!occurredAt) occurredAt = new Date();
 
     const result = await prisma.$transaction(async (tx) => {
+      // amountMinor is in the pre-read account currency; fail closed if FX
+      // conversion flipped Account.currency before we insert.
+      await assertAccountCurrencyLocked(tx, accountId, account.currency);
+
       const txRow = await tx.transaction.create({
         data: {
           accountId,
@@ -220,6 +228,18 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
 
     return res.status(201).json(result);
   } catch (err) {
+    if (
+      err instanceof AccountCurrencyChangedError ||
+      err?.code === "account_currency_changed"
+    ) {
+      return res.status(409).json({
+        code: "account_currency_changed",
+        error: err.message,
+      });
+    }
+    if (err?.statusCode === 404) {
+      return res.status(404).json({ error: err.message || "Account not found" });
+    }
     next(err);
   }
 });

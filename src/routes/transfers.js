@@ -6,6 +6,10 @@ const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
 const { requireAuth } = require("../middleware/auth");
+const {
+  AccountCurrencyChangedError,
+  assertAccountsCurrencyLocked,
+} = require("../lib/lockAccountCurrency");
 
 const transfersRouter = Router();
 
@@ -150,6 +154,13 @@ transfersRouter.post("/", async (req, res, next) => {
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // Amounts / fxRate were computed from pre-read currencies; fail closed if
+      // either account converted before we insert the paired legs.
+      await assertAccountsCurrencyLocked(tx, [
+        { accountId: fromAccount.id, expectedCurrency: fromAccount.currency },
+        { accountId: toAccount.id, expectedCurrency: toAccount.currency },
+      ]);
+
       await throwIfExpenseWouldCauseNegativeCashBalance(
         tx,
         fromAccount.id,
@@ -228,6 +239,18 @@ transfersRouter.post("/", async (req, res, next) => {
 
     return res.status(201).json(result);
   } catch (err) {
+    if (
+      err instanceof AccountCurrencyChangedError ||
+      err?.code === "account_currency_changed"
+    ) {
+      return res.status(409).json({
+        code: "account_currency_changed",
+        error: err.message,
+      });
+    }
+    if (err?.statusCode === 404) {
+      return res.status(404).json({ error: err.message || "Account not found" });
+    }
     if (err && err.code === "NEGATIVE_CASH_BALANCE") {
       return res.status(400).json({ error: err.message });
     }

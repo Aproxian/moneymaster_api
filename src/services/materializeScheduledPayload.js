@@ -2,6 +2,7 @@ const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("./nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("./categoryMemberAccess");
+const { lockAccountCurrencyForUpdate } = require("../lib/lockAccountCurrency");
 
 /**
  * Creates a ledger row from a stored schedule payload (same rules as manual POST routes).
@@ -22,11 +23,23 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
     throw new Error("MISSING_CATEGORY");
   }
 
-  const account = await tx.account.findFirst({
+  // Lock Account so we serialize with change-currency and stamp the live currency.
+  // Schedule payload amounts are account-currency-denominated (see currency-change
+  // schedule conversion); reading without FOR UPDATE can insert mixed-currency rows.
+  const locked = await lockAccountCurrencyForUpdate(tx, accountId);
+  if (!locked) throw new Error("NO_ACCOUNT");
+
+  const accountRow = await tx.account.findFirst({
     where: { id: accountId, deletedAt: null },
-    select: { id: true, currency: true, investingEnabled: true, walletsEnabled: true },
+    select: { id: true, investingEnabled: true, walletsEnabled: true },
   });
-  if (!account) throw new Error("NO_ACCOUNT");
+  if (!accountRow) throw new Error("NO_ACCOUNT");
+  const account = {
+    id: accountRow.id,
+    currency: locked.currency,
+    investingEnabled: accountRow.investingEnabled,
+    walletsEnabled: accountRow.walletsEnabled,
+  };
 
   if (account.walletsEnabled) {
     if (!walletId) throw new Error("WALLET_REQUIRED");
