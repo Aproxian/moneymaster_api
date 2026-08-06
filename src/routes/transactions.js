@@ -7,6 +7,7 @@ const {
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const { optionalCoercedDate } = require("../lib/zodDate");
 
 /**
  * @param {string} accountId
@@ -65,7 +66,7 @@ const createTransactionSchema = z.object({
   type: z.enum(["INCOME", "EXPENSE"]),
   amountMinor: z.number().int().positive(),
   currency: z.string().min(1).max(10).optional(),
-  occurredAt: z.coerce.date().optional(),
+  occurredAt: optionalCoercedDate,
   /** Calendar date ("YYYY-MM-DD") for back-dated entries; anchored to noon in the account timezone. */
   occurredOnDate: z
     .string()

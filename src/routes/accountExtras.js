@@ -11,6 +11,7 @@ const { walletBalanceMinor } = require("../services/walletBalance");
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
+const { optionalCoercedDate } = require("../lib/zodDate");
 
 const accountExtrasRouter = Router({ mergeParams: true });
 
@@ -33,7 +34,7 @@ const structuredTransferSchema = z.discriminatedUnion("kind", [
     toWalletId: z.string().min(1),
     amountMinor: z.number().int().positive(),
     note: z.string().max(500).optional(),
-    occurredAt: z.coerce.date().optional(),
+    occurredAt: optionalCoercedDate,
   }),
   z.object({
     kind: z.literal("ACCOUNT"),
@@ -43,7 +44,7 @@ const structuredTransferSchema = z.discriminatedUnion("kind", [
     toWalletId: z.string().min(1).optional(),
     fxRate: z.number().positive().optional(),
     note: z.string().max(500).optional(),
-    occurredAt: z.coerce.date().optional(),
+    occurredAt: optionalCoercedDate,
   }),
 ]);
 
