@@ -2,6 +2,10 @@ const { prisma } = require("../prisma");
 const { logApp } = require("../lib/fileLogger");
 const { advanceScheduleUtc } = require("./advanceRecurrence");
 const { materializeScheduledPayload } = require("./materializeScheduledPayload");
+const {
+  cancelPendingInvestSchedulesForInstruments,
+  payloadIsInvestTab,
+} = require("../lib/investScheduleCancel");
 
 const MAX_BURST = 500;
 
@@ -84,8 +88,34 @@ async function processPendingSchedulesForUser(userId) {
         }
       });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Defensive: instrument may already be inactive (e.g. deactivated before
+      // this helper existed). Leaving the row PENDING with a past nextRunAt
+      // starves take(200). Cancel invest templates that reference a dead instrument.
+      if (msg === "BAD_INSTRUMENT" && payloadIsInvestTab(sch.payload)) {
+        const instrumentId =
+          sch.payload != null &&
+          typeof sch.payload === "object" &&
+          typeof sch.payload.instrumentId === "string"
+            ? sch.payload.instrumentId
+            : null;
+        if (instrumentId) {
+          try {
+            await cancelPendingInvestSchedulesForInstruments(prisma, [instrumentId]);
+          } catch (cancelErr) {
+            logApp("ERROR", "Schedules", "BAD_INSTRUMENT cancel failed", {
+              scheduleId: sch.id,
+              instrumentId,
+              error:
+                cancelErr instanceof Error
+                  ? { message: cancelErr.message, stack: cancelErr.stack }
+                  : String(cancelErr),
+            });
+          }
+        }
+      }
       // eslint-disable-next-line no-console -- operational visibility
-      console.error("[schedules] failed row", sch.id, err?.message || err);
+      console.error("[schedules] failed row", sch.id, msg);
       logApp("ERROR", "Schedules", "failed row", {
         scheduleId: sch.id,
         error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
