@@ -2,6 +2,7 @@ const { prisma } = require("../prisma");
 const { logApp } = require("../lib/fileLogger");
 const { advanceScheduleUtc } = require("./advanceRecurrence");
 const { materializeScheduledPayload } = require("./materializeScheduledPayload");
+const { isPermanentCategoryScheduleError } = require("../lib/schedulePayloads");
 
 const MAX_BURST = 500;
 
@@ -84,6 +85,23 @@ async function processPendingSchedulesForUser(userId) {
         }
       });
     } catch (err) {
+      // Permanent category lock/ACL/delete failures never self-heal: cancel so the
+      // due PENDING row cannot starve other schedules in take(200).
+      if (isPermanentCategoryScheduleError(err)) {
+        try {
+          await prisma.pendingTransactionSchedule.updateMany({
+            where: { id: sch.id, status: "PENDING", cancelledAt: null },
+            data: { status: "CANCELLED", cancelledAt: new Date() },
+          });
+        } catch (cancelErr) {
+          // eslint-disable-next-line no-console -- operational visibility
+          console.error(
+            "[schedules] failed to cancel permanent category error row",
+            sch.id,
+            cancelErr?.message || cancelErr
+          );
+        }
+      }
       // eslint-disable-next-line no-console -- operational visibility
       console.error("[schedules] failed row", sch.id, err?.message || err);
       logApp("ERROR", "Schedules", "failed row", {
