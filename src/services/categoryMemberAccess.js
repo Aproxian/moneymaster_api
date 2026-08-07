@@ -1,5 +1,8 @@
 const { TRANSFER_SEND, TRANSFER_RECEIVE } = require("../lib/transferCategoryKeys");
 const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
+const {
+  cancelPendingSchedulesForCategoryDeniedCreators,
+} = require("../lib/schedulePayloads");
 
 function isTransferOrCashoutInternalKey(internalKey) {
   if (!internalKey) return false;
@@ -208,6 +211,16 @@ async function setCategoryMemberAccess(client, { accountId, categoryId, allowedU
       await tx.categoryMemberAccess.createMany({
         data: [...merged].map((userId) => ({ categoryId, userId })),
         skipDuplicates: true,
+      });
+    }
+
+    // Creators who lose category access would otherwise leave due PENDING rows
+    // that fail materialize with CATEGORY_ACCESS_DENIED every processor pass.
+    if (memberAccessRestricted) {
+      await cancelPendingSchedulesForCategoryDeniedCreators(tx, {
+        accountId,
+        categoryId,
+        allowedUserIds: merged,
       });
     }
   });

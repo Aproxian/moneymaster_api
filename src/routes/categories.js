@@ -14,6 +14,7 @@ const {
   getPrimaryOwnerUserId,
   setCategoryMemberAccess,
 } = require("../services/categoryMemberAccess");
+const { countPendingSchedulesForCategory } = require("../lib/schedulePayloads");
 
 // Mounted at /accounts/:accountId/categories
 const categoriesRouter = Router({ mergeParams: true });
@@ -605,6 +606,26 @@ categoriesRouter.patch("/:categoryId", async (req, res, next) => {
       return res.status(400).json({
         error: "System categories cannot change manual-entry lock",
       });
+    }
+
+    // Locking blocks schedule materialize (BAD_CATEGORY / BAD_INV_CATEGORY). Failed
+    // rows stay PENDING with a past nextRunAt and can starve the take(200) batch.
+    if (body.lockedForManualEntry === true) {
+      const pendingScheduleCount = await countPendingSchedulesForCategory(
+        prisma,
+        accountId,
+        categoryId
+      );
+      if (pendingScheduleCount > 0) {
+        const noun = pendingScheduleCount === 1 ? "schedule" : "schedules";
+        const human = `This category is still used by ${pendingScheduleCount} pending ${noun}. Cancel those scheduled entries first; then you can lock this category for manual entry.`;
+        return res.status(409).json({
+          code: "category_has_pending_schedules",
+          error: human,
+          message: human,
+          pendingScheduleCount,
+        });
+      }
     }
 
     const updated = await prisma.category.update({
