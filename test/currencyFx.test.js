@@ -19,7 +19,7 @@ test("rejects non-zero amounts that round to zero (e.g. weak VND→USD)", () => 
     (err) =>
       err instanceof Error &&
       err.code === "FX_AMOUNT_ROUNDS_TO_ZERO" &&
-      /rounds to zero/i.test(err.message)
+      /round .* to zero/i.test(err.message)
   );
 });
 
