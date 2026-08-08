@@ -26,6 +26,7 @@ const {
   countActiveAccountMemberships,
 } = require("../lib/accountLimits");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
+const { convertMinorUnits } = require("../lib/currencyFx");
 
 const accountsRouter = Router();
 
@@ -1138,7 +1139,9 @@ accountsRouter.post(
         });
 
         for (const t of txns) {
-          const converted = Math.round(t.amountMinor * fxRate);
+          // Fail closed before any row is rewritten when a non-zero amount would
+          // round to 0 (weak fxRate / tiny minor units). The transaction rolls back.
+          const converted = convertMinorUnits(t.amountMinor, fxRate);
           await tx.transaction.update({
             where: { id: t.id },
             data: {
@@ -1193,6 +1196,9 @@ accountsRouter.post(
 
       return res.status(200).json(result);
     } catch (err) {
+      if (err && (err.code === "FX_AMOUNT_ROUNDS_TO_ZERO" || err.code === "FX_AMOUNT_INVALID")) {
+        return res.status(400).json({ error: err.message });
+      }
       next(err);
     }
   }
