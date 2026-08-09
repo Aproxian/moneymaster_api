@@ -11,6 +11,11 @@ const { walletBalanceMinor } = require("../services/walletBalance");
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
+const {
+  assertWalletDeletable,
+  WalletHasOpenTransactionsError,
+  WalletBalanceNonemptyError,
+} = require("../lib/walletDeleteGuard");
 
 const accountExtrasRouter = Router({ mergeParams: true });
 
@@ -234,24 +239,37 @@ accountExtrasRouter.delete("/wallets/:walletId", async (req, res, next) => {
     const { accountId, walletId } = req.params;
     const userId = req.auth.userId;
 
-    const existing = await prisma.accountWallet.findFirst({
-      where: { id: walletId, accountId, deletedAt: null },
-      select: { id: true },
-    });
-    if (!existing) return res.status(404).json({ error: "Wallet not found" });
-
-    const bal = await walletBalanceMinor(prisma, walletId);
-    if (bal !== 0) {
-      return res.status(400).json({
-        error: "Wallet balance must be zero before it can be deleted",
-        balanceMinor: bal,
+    try {
+      await prisma.$transaction(async (tx) => {
+        await assertWalletDeletable(tx, { walletId, accountId });
+        await tx.accountWallet.update({
+          where: { id: walletId },
+          data: { deletedAt: new Date() },
+        });
       });
+    } catch (e) {
+      if (e && e.statusCode === 404) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (e instanceof WalletBalanceNonemptyError) {
+        return res.status(400).json({
+          error: "Wallet balance must be zero before it can be deleted",
+          balanceMinor: e.balanceMinor,
+        });
+      }
+      if (e instanceof WalletHasOpenTransactionsError) {
+        const n = e.openTransactionCount;
+        const noun = n === 1 ? "transaction" : "transactions";
+        const human = `This wallet still has ${n} open ${noun}. Reassign or revoke those ledger rows first; then you can delete this wallet.`;
+        return res.status(409).json({
+          code: e.code,
+          error: human,
+          message: human,
+          openTransactionCount: n,
+        });
+      }
+      throw e;
     }
-
-    await prisma.accountWallet.update({
-      where: { id: walletId },
-      data: { deletedAt: new Date() },
-    });
 
     await prisma.auditLog.create({
       data: {
