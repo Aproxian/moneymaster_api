@@ -5,6 +5,10 @@ const { prisma } = require("../prisma");
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
+const {
+  assertTransferWalletsLocked,
+  TransferWalletUnavailableError,
+} = require("../lib/transferWallets");
 const { requireAuth } = require("../middleware/auth");
 
 const transfersRouter = Router();
@@ -150,6 +154,17 @@ transfersRouter.post("/", async (req, res, next) => {
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // Re-lock wallets inside the write txn so a concurrent soft-delete cannot
+      // win after the pre-checks above and trap the credit/debit on a hidden wallet.
+      await assertTransferWalletsLocked(tx, [
+        body.fromWalletId
+          ? { walletId: body.fromWalletId, accountId: fromAccount.id }
+          : null,
+        body.toWalletId
+          ? { walletId: body.toWalletId, accountId: toAccount.id }
+          : null,
+      ]);
+
       await throwIfExpenseWouldCauseNegativeCashBalance(
         tx,
         fromAccount.id,
@@ -228,6 +243,9 @@ transfersRouter.post("/", async (req, res, next) => {
 
     return res.status(201).json(result);
   } catch (err) {
+    if (err instanceof TransferWalletUnavailableError) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
     if (err && err.code === "NEGATIVE_CASH_BALANCE") {
       return res.status(400).json({ error: err.message });
     }
