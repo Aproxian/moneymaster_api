@@ -58,14 +58,25 @@ async function processPendingSchedulesForUser(userId) {
           if (!fresh.recurrenceUnit) return;
           let slot = new Date(fresh.nextRunAt);
           let runs = 0;
+          // Catch up one slot at a time. Cash-guard failures must not roll back
+          // earlier successful posts in the same burst — otherwise a backlog of N
+          // due expenses stays stuck forever until the book covers all N at once
+          // (starving take(200) while nextRunAt never advances).
           while (slot <= now && runs < MAX_BURST) {
-            await materializeScheduledPayload(tx, {
-              accountId: fresh.accountId,
-              userId: fresh.createdByUserId,
-              occurredAt: new Date(slot),
-              payload: fresh.payload,
-              scheduleKind: fresh.kind,
-            });
+            try {
+              await materializeScheduledPayload(tx, {
+                accountId: fresh.accountId,
+                userId: fresh.createdByUserId,
+                occurredAt: new Date(slot),
+                payload: fresh.payload,
+                scheduleKind: fresh.kind,
+              });
+            } catch (err) {
+              if (err && err.code === "NEGATIVE_CASH_BALANCE") {
+                break;
+              }
+              throw err;
+            }
             runs += 1;
             slot = advanceScheduleUtc(
               slot,
@@ -74,13 +85,15 @@ async function processPendingSchedulesForUser(userId) {
               fresh.hourOfDay
             );
           }
-          await tx.pendingTransactionSchedule.update({
-            where: { id: fresh.id },
-            data: {
-              nextRunAt: slot,
-              lastRunAt: now,
-            },
-          });
+          if (runs > 0) {
+            await tx.pendingTransactionSchedule.update({
+              where: { id: fresh.id },
+              data: {
+                nextRunAt: slot,
+                lastRunAt: now,
+              },
+            });
+          }
         }
       });
     } catch (err) {

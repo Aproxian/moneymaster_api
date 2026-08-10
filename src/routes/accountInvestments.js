@@ -6,6 +6,10 @@ const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  assertOpenWalletLocked,
+  WalletUnavailableError,
+} = require("../lib/lockWallet");
 
 // Mounted at /accounts/:accountId/investments
 const accountInvestmentsRouter = Router({ mergeParams: true });
@@ -133,90 +137,103 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
     }
     if (!occurredAt) occurredAt = new Date();
 
-    const result = await prisma.$transaction(async (tx) => {
-      const txRow = await tx.transaction.create({
-        data: {
-          accountId,
-          type: "INVESTMENT",
-          amountMinor: body.amountMinor,
-          currency: account.currency,
-          occurredAt,
-          note: body.note ?? null,
-          categoryId: category.id,
-          createdByUserId: userId,
-          instrumentId: instrument.id,
-          investmentQuantity: body.quantity,
-          walletId,
-        },
-        select: {
-          id: true,
-          type: true,
-          amountMinor: true,
-          currency: true,
-          occurredAt: true,
-          note: true,
-          categoryId: true,
-          instrumentId: true,
-          investmentQuantity: true,
-          createdAt: true,
-        },
-      });
+    let result;
+    try {
+      result = await prisma.$transaction(async (tx) => {
+        // Re-lock so concurrent empty-wallet soft-delete cannot trap the buy.
+        if (walletId) {
+          await assertOpenWalletLocked(tx, { walletId, accountId });
+        }
 
-      const holding = await tx.holding.upsert({
-        where: {
-          accountId_instrumentId: {
+        const txRow = await tx.transaction.create({
+          data: {
             accountId,
-            instrumentId: instrument.id,
-          },
-        },
-        update: {
-          categoryId: category.id,
-          quantity: {
-            increment: body.quantity,
-          },
-          costBasisMinor: {
-            increment: body.amountMinor,
-          },
-          // Clear soft-delete when re-buying an instrument that was previously fully cashed out.
-          deletedAt: null,
-        },
-        create: {
-          accountId,
-          instrumentId: instrument.id,
-          categoryId: category.id,
-          quantity: body.quantity,
-          costBasisMinor: body.amountMinor,
-          note: body.note ?? null,
-        },
-        select: {
-          id: true,
-          accountId: true,
-          instrumentId: true,
-          categoryId: true,
-          quantity: true,
-        },
-      });
-
-      await tx.auditLog.create({
-        data: {
-          userId,
-          action: "CREATE",
-          entity: "Investment",
-          entityId: txRow.id,
-          meta: {
-            accountId,
-            instrumentId: instrument.id,
-            instrumentName: instrument.name,
-            providerSymbol: instrument.providerSymbol,
-            amountMinor: txRow.amountMinor,
+            type: "INVESTMENT",
+            amountMinor: body.amountMinor,
+            currency: account.currency,
+            occurredAt,
+            note: body.note ?? null,
             categoryId: category.id,
-            quantity: holding.quantity,
+            createdByUserId: userId,
+            instrumentId: instrument.id,
+            investmentQuantity: body.quantity,
+            walletId,
           },
-        },
-      });
+          select: {
+            id: true,
+            type: true,
+            amountMinor: true,
+            currency: true,
+            occurredAt: true,
+            note: true,
+            categoryId: true,
+            instrumentId: true,
+            investmentQuantity: true,
+            createdAt: true,
+          },
+        });
 
-      return { transaction: txRow, holding };
-    });
+        const holding = await tx.holding.upsert({
+          where: {
+            accountId_instrumentId: {
+              accountId,
+              instrumentId: instrument.id,
+            },
+          },
+          update: {
+            categoryId: category.id,
+            quantity: {
+              increment: body.quantity,
+            },
+            costBasisMinor: {
+              increment: body.amountMinor,
+            },
+            // Clear soft-delete when re-buying an instrument that was previously fully cashed out.
+            deletedAt: null,
+          },
+          create: {
+            accountId,
+            instrumentId: instrument.id,
+            categoryId: category.id,
+            quantity: body.quantity,
+            costBasisMinor: body.amountMinor,
+            note: body.note ?? null,
+          },
+          select: {
+            id: true,
+            accountId: true,
+            instrumentId: true,
+            categoryId: true,
+            quantity: true,
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            userId,
+            action: "CREATE",
+            entity: "Investment",
+            entityId: txRow.id,
+            meta: {
+              accountId,
+              instrumentId: instrument.id,
+              instrumentName: instrument.name,
+              providerSymbol: instrument.providerSymbol,
+              amountMinor: txRow.amountMinor,
+              categoryId: category.id,
+              quantity: holding.quantity,
+            },
+          },
+        });
+
+        return { transaction: txRow, holding };
+      });
+    } catch (e) {
+      if (e instanceof WalletUnavailableError) {
+        return res.status(409).json({ error: e.message, code: e.code });
+      }
+      throw e;
+    }
 
     return res.status(201).json(result);
   } catch (err) {

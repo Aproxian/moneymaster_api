@@ -7,6 +7,14 @@ const {
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  applyWalletAssignments,
+  AssignWalletsError,
+} = require("../lib/assignWallets");
+const {
+  assertOpenWalletLocked,
+  WalletUnavailableError,
+} = require("../lib/lockWallet");
 
 /**
  * @param {string} accountId
@@ -267,49 +275,22 @@ transactionsRouter.post("/assign-wallets", async (req, res, next) => {
     const userId = req.auth.userId;
     const body = assignWalletsBulkSchema.parse(req.body);
 
-    const account = await prisma.account.findFirst({
-      where: { id: accountId, deletedAt: null },
-      select: { id: true, walletsEnabled: true, walletMigrationPending: true },
-    });
-    if (!account) return res.status(404).json({ error: "Account not found" });
-    if (!account.walletsEnabled && !account.walletMigrationPending) {
-      return res.status(400).json({ error: "Wallets are not enabled for this account" });
-    }
-
-    const walletRows = await prisma.accountWallet.findMany({
-      where: { accountId, deletedAt: null },
-      select: { id: true },
-    });
-    const walletSet = new Set(walletRows.map((w) => w.id));
-
-    const txIds = [...new Set(body.assignments.map((a) => a.transactionId))];
-    const rows = await prisma.transaction.findMany({
-      where: {
-        id: { in: txIds },
-        accountId,
-        deletedAt: null,
-        revokedAt: null,
-      },
-      select: { id: true },
-    });
-    if (rows.length !== txIds.length) {
-      return res.status(400).json({ error: "One or more transactions were not found or are not assignable" });
-    }
-
-    for (const a of body.assignments) {
-      if (!walletSet.has(a.walletId)) {
-        return res.status(400).json({ error: "Invalid walletId in assignments" });
-      }
-    }
-
-    await prisma.$transaction(
-      body.assignments.map((a) =>
-        prisma.transaction.update({
-          where: { id: a.transactionId },
-          data: { walletId: a.walletId },
+    let updated;
+    try {
+      ({ updated } = await prisma.$transaction(async (tx) =>
+        applyWalletAssignments(tx, {
+          accountId,
+          assignments: body.assignments,
         })
-      )
-    );
+      ));
+    } catch (e) {
+      if (e instanceof AssignWalletsError) {
+        const payload = { error: e.message };
+        if (e.code) payload.code = e.code;
+        return res.status(e.statusCode).json(payload);
+      }
+      throw e;
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -317,11 +298,11 @@ transactionsRouter.post("/assign-wallets", async (req, res, next) => {
         action: "UPDATE",
         entity: "Transaction",
         entityId: accountId,
-        meta: { accountId, action: "BULK_ASSIGN_WALLETS", count: body.assignments.length },
+        meta: { accountId, action: "BULK_ASSIGN_WALLETS", count: updated },
       },
     });
 
-    return res.json({ updated: body.assignments.length });
+    return res.json({ updated });
   } catch (err) {
     next(err);
   }
@@ -571,62 +552,76 @@ transactionsRouter.post("/", async (req, res, next) => {
     }
     if (!occurredAt) occurredAt = new Date();
 
-    if (body.type === "EXPENSE") {
-      try {
-        await throwIfExpenseWouldCauseNegativeCashBalance(
-          prisma,
-          accountId,
-          body.amountMinor,
-          walletId
-        );
-      } catch (e) {
-        if (e && e.code === "NEGATIVE_CASH_BALANCE") {
-          return res.status(400).json({ error: e.message });
+    let tx;
+    try {
+      tx = await prisma.$transaction(async (db) => {
+        // Re-lock inside the write txn so concurrent empty-wallet soft-delete
+        // cannot trap this row on a hidden deletedAt wallet.
+        if (walletId) {
+          await assertOpenWalletLocked(db, { walletId, accountId });
         }
-        throw e;
+
+        if (body.type === "EXPENSE") {
+          await throwIfExpenseWouldCauseNegativeCashBalance(
+            db,
+            accountId,
+            body.amountMinor,
+            walletId
+          );
+        }
+
+        const created = await db.transaction.create({
+          data: {
+            accountId,
+            type: body.type,
+            amountMinor: body.amountMinor,
+            currency,
+            occurredAt,
+            note: body.note ?? null,
+            categoryId: body.categoryId,
+            createdByUserId: userId,
+            walletId,
+          },
+          select: {
+            id: true,
+            type: true,
+            amountMinor: true,
+            currency: true,
+            occurredAt: true,
+            note: true,
+            categoryId: true,
+            walletId: true,
+            revokedAt: true,
+            createdAt: true,
+          },
+        });
+
+        await db.auditLog.create({
+          data: {
+            userId,
+            action: "CREATE",
+            entity: "Transaction",
+            entityId: created.id,
+            meta: {
+              accountId,
+              type: created.type,
+              amountMinor: created.amountMinor,
+              currency: created.currency,
+            },
+          },
+        });
+
+        return created;
+      });
+    } catch (e) {
+      if (e instanceof WalletUnavailableError) {
+        return res.status(409).json({ error: e.message, code: e.code });
       }
+      if (e && e.code === "NEGATIVE_CASH_BALANCE") {
+        return res.status(400).json({ error: e.message });
+      }
+      throw e;
     }
-
-    const tx = await prisma.transaction.create({
-      data: {
-        accountId,
-        type: body.type,
-        amountMinor: body.amountMinor,
-        currency,
-        occurredAt,
-        note: body.note ?? null,
-        categoryId: body.categoryId,
-        createdByUserId: userId,
-        walletId,
-      },
-      select: {
-        id: true,
-        type: true,
-        amountMinor: true,
-        currency: true,
-        occurredAt: true,
-        note: true,
-        categoryId: true,
-        walletId: true,
-        revokedAt: true,
-        createdAt: true,
-      },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: "CREATE",
-        entity: "Transaction",
-        entityId: tx.id,
-        meta: {
-          accountId,
-          type: tx.type,
-          amountMinor: tx.amountMinor,
-          currency: tx.currency,
-        },
-      },
-    });
 
     return res.status(201).json({ transaction: tx });
   } catch (err) {

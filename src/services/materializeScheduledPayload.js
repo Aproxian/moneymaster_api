@@ -2,6 +2,7 @@ const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("./nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("./categoryMemberAccess");
+const { lockOpenWalletForUpdate } = require("../lib/lockWallet");
 
 /**
  * Creates a ledger row from a stored schedule payload (same rules as manual POST routes).
@@ -30,10 +31,8 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
 
   if (account.walletsEnabled) {
     if (!walletId) throw new Error("WALLET_REQUIRED");
-    const w = await tx.accountWallet.findFirst({
-      where: { id: walletId, accountId, deletedAt: null },
-      select: { id: true },
-    });
+    // FOR UPDATE so concurrent empty-wallet soft-delete cannot trap the post.
+    const w = await lockOpenWalletForUpdate(tx, { walletId, accountId });
     if (!w) throw new Error("BAD_WALLET");
   } else if (walletId) {
     throw new Error("WALLET_NOT_ALLOWED");
