@@ -7,6 +7,10 @@ const {
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  applyWalletAssignments,
+  AssignWalletsError,
+} = require("../lib/assignWallets");
 
 /**
  * @param {string} accountId
@@ -267,49 +271,22 @@ transactionsRouter.post("/assign-wallets", async (req, res, next) => {
     const userId = req.auth.userId;
     const body = assignWalletsBulkSchema.parse(req.body);
 
-    const account = await prisma.account.findFirst({
-      where: { id: accountId, deletedAt: null },
-      select: { id: true, walletsEnabled: true, walletMigrationPending: true },
-    });
-    if (!account) return res.status(404).json({ error: "Account not found" });
-    if (!account.walletsEnabled && !account.walletMigrationPending) {
-      return res.status(400).json({ error: "Wallets are not enabled for this account" });
-    }
-
-    const walletRows = await prisma.accountWallet.findMany({
-      where: { accountId, deletedAt: null },
-      select: { id: true },
-    });
-    const walletSet = new Set(walletRows.map((w) => w.id));
-
-    const txIds = [...new Set(body.assignments.map((a) => a.transactionId))];
-    const rows = await prisma.transaction.findMany({
-      where: {
-        id: { in: txIds },
-        accountId,
-        deletedAt: null,
-        revokedAt: null,
-      },
-      select: { id: true },
-    });
-    if (rows.length !== txIds.length) {
-      return res.status(400).json({ error: "One or more transactions were not found or are not assignable" });
-    }
-
-    for (const a of body.assignments) {
-      if (!walletSet.has(a.walletId)) {
-        return res.status(400).json({ error: "Invalid walletId in assignments" });
-      }
-    }
-
-    await prisma.$transaction(
-      body.assignments.map((a) =>
-        prisma.transaction.update({
-          where: { id: a.transactionId },
-          data: { walletId: a.walletId },
+    let updated;
+    try {
+      ({ updated } = await prisma.$transaction(async (tx) =>
+        applyWalletAssignments(tx, {
+          accountId,
+          assignments: body.assignments,
         })
-      )
-    );
+      ));
+    } catch (e) {
+      if (e instanceof AssignWalletsError) {
+        const payload = { error: e.message };
+        if (e.code) payload.code = e.code;
+        return res.status(e.statusCode).json(payload);
+      }
+      throw e;
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -317,11 +294,11 @@ transactionsRouter.post("/assign-wallets", async (req, res, next) => {
         action: "UPDATE",
         entity: "Transaction",
         entityId: accountId,
-        meta: { accountId, action: "BULK_ASSIGN_WALLETS", count: body.assignments.length },
+        meta: { accountId, action: "BULK_ASSIGN_WALLETS", count: updated },
       },
     });
 
-    return res.json({ updated: body.assignments.length });
+    return res.json({ updated });
   } catch (err) {
     next(err);
   }
