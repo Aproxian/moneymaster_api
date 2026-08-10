@@ -7,6 +7,10 @@ const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
 const { getPrimaryOwnerUserId } = require("../services/categoryMemberAccess");
 const { ensureInvestmentCategories } = require("../services/investingCategories");
+const {
+  assertOpenWalletLocked,
+  WalletUnavailableError,
+} = require("../lib/lockWallet");
 
 const accountInstrumentsRouter = Router({ mergeParams: true });
 
@@ -194,6 +198,11 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // Re-lock so concurrent empty-wallet soft-delete cannot trap proceeds.
+      if (walletId) {
+        await assertOpenWalletLocked(tx, { walletId, accountId });
+      }
+
       const holding = await tx.holding.findFirst({
         where: { accountId, instrumentId, deletedAt: null },
       });
@@ -306,6 +315,9 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
 
     return res.status(201).json(result);
   } catch (err) {
+    if (err instanceof WalletUnavailableError) {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
     if (err.message === "NO_HOLDING") {
       return res.status(400).json({ error: "No open holding for this instrument" });
     }

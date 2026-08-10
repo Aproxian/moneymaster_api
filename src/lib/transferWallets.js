@@ -1,13 +1,15 @@
 "use strict";
 
-const { lockOpenWalletForUpdate } = require("./lockWallet");
+const {
+  assertOpenWalletLocked,
+  WalletUnavailableError,
+} = require("./lockWallet");
 
-class TransferWalletUnavailableError extends Error {
+// Keep the transfer-specific name for existing call sites / tests.
+class TransferWalletUnavailableError extends WalletUnavailableError {
   constructor(message = "One or more wallets are no longer available for this transfer") {
     super(message);
     this.name = "TransferWalletUnavailableError";
-    this.statusCode = 409;
-    this.code = "wallet_unavailable";
   }
 }
 
@@ -38,11 +40,15 @@ async function assertTransferWalletsLocked(tx, refs) {
     return a.walletId.localeCompare(b.walletId);
   });
 
-  for (const { walletId, accountId } of ordered) {
-    const locked = await lockOpenWalletForUpdate(tx, { walletId, accountId });
-    if (!locked) {
+  try {
+    for (const { walletId, accountId } of ordered) {
+      await assertOpenWalletLocked(tx, { walletId, accountId });
+    }
+  } catch (err) {
+    if (err instanceof WalletUnavailableError) {
       throw new TransferWalletUnavailableError();
     }
+    throw err;
   }
 }
 
