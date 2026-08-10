@@ -25,6 +25,10 @@ const {
   INVITEE_AT_ACCOUNT_LIMIT_MESSAGE,
   countActiveAccountMemberships,
 } = require("../lib/accountLimits");
+const {
+  MembershipRemoveConflictError,
+  deleteMembershipForRemoval,
+} = require("../lib/accountOwnership");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
 
 const accountsRouter = Router();
@@ -428,8 +432,13 @@ accountsRouter.delete(
             category: { accountId },
           },
         });
-        await tx.accountMember.delete({
-          where: { userId_accountId: { userId: memberUserId, accountId } },
+        // Conditional role predicate closes the race where transfer-ownership
+        // promotes this member after the stale pre-check above.
+        await deleteMembershipForRemoval(tx, {
+          accountId,
+          memberUserId,
+          requesterRole: req.memberRole,
+          observedTargetRole: target.role,
         });
       });
 
@@ -454,6 +463,16 @@ accountsRouter.delete(
 
       return res.status(204).send();
     } catch (err) {
+      if (err instanceof MembershipRemoveConflictError) {
+        if (err.reason === "last_owner") {
+          return res.status(400).json({ error: err.message });
+        }
+        return res.status(409).json({
+          error: "member_role_changed",
+          message:
+            "That member's role changed (for example ownership was transferred). Refresh and try again.",
+        });
+      }
       next(err);
     }
   }
