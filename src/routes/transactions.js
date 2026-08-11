@@ -4,6 +4,8 @@ const { z } = require("zod");
 const { prisma } = require("../prisma");
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
+  throwIfCashBalancesAreNegative,
+  lockAccountsForNegativeCashGuard,
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
@@ -571,62 +573,67 @@ transactionsRouter.post("/", async (req, res, next) => {
     }
     if (!occurredAt) occurredAt = new Date();
 
-    if (body.type === "EXPENSE") {
-      try {
-        await throwIfExpenseWouldCauseNegativeCashBalance(
-          prisma,
-          accountId,
-          body.amountMinor,
-          walletId
-        );
-      } catch (e) {
-        if (e && e.code === "NEGATIVE_CASH_BALANCE") {
-          return res.status(400).json({ error: e.message });
+    let tx;
+    try {
+      tx = await prisma.$transaction(async (db) => {
+        if (body.type === "EXPENSE") {
+          await throwIfExpenseWouldCauseNegativeCashBalance(
+            db,
+            accountId,
+            body.amountMinor,
+            walletId
+          );
         }
-        throw e;
+
+        const created = await db.transaction.create({
+          data: {
+            accountId,
+            type: body.type,
+            amountMinor: body.amountMinor,
+            currency,
+            occurredAt,
+            note: body.note ?? null,
+            categoryId: body.categoryId,
+            createdByUserId: userId,
+            walletId,
+          },
+          select: {
+            id: true,
+            type: true,
+            amountMinor: true,
+            currency: true,
+            occurredAt: true,
+            note: true,
+            categoryId: true,
+            walletId: true,
+            revokedAt: true,
+            createdAt: true,
+          },
+        });
+
+        await db.auditLog.create({
+          data: {
+            userId,
+            action: "CREATE",
+            entity: "Transaction",
+            entityId: created.id,
+            meta: {
+              accountId,
+              type: created.type,
+              amountMinor: created.amountMinor,
+              currency: created.currency,
+            },
+          },
+        });
+
+        return created;
+      });
+    } catch (e) {
+      if (e && e.code === "NEGATIVE_CASH_BALANCE") {
+        return res.status(400).json({ error: e.message });
       }
+      throw e;
     }
-
-    const tx = await prisma.transaction.create({
-      data: {
-        accountId,
-        type: body.type,
-        amountMinor: body.amountMinor,
-        currency,
-        occurredAt,
-        note: body.note ?? null,
-        categoryId: body.categoryId,
-        createdByUserId: userId,
-        walletId,
-      },
-      select: {
-        id: true,
-        type: true,
-        amountMinor: true,
-        currency: true,
-        occurredAt: true,
-        note: true,
-        categoryId: true,
-        walletId: true,
-        revokedAt: true,
-        createdAt: true,
-      },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: "CREATE",
-        entity: "Transaction",
-        entityId: tx.id,
-        meta: {
-          accountId,
-          type: tx.type,
-          amountMinor: tx.amountMinor,
-          currency: tx.currency,
-        },
-      },
-    });
 
     return res.status(201).json({ transaction: tx });
   } catch (err) {
@@ -665,10 +672,28 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
       return res.status(400).json({ error: "Transaction is already revoked" });
     }
 
+    const revokeSelect = {
+      id: true,
+      type: true,
+      amountMinor: true,
+      currency: true,
+      occurredAt: true,
+      note: true,
+      categoryId: true,
+      instrumentId: true,
+      investmentQuantity: true,
+      revokedAt: true,
+      createdAt: true,
+      updatedAt: true,
+    };
+
     const updated = await prisma.$transaction(async (tx) => {
       const now = new Date();
 
       if (existing.transferPairId) {
+        // Wallet↔wallet legs are net-zero on the book, but the destination pile can go
+        // negative if its credit was already spent — lock then re-check under the cash lock.
+        await lockAccountsForNegativeCashGuard(tx, [accountId]);
         await tx.transaction.updateMany({
           where: {
             accountId,
@@ -678,26 +703,28 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
           },
           data: { revokedAt: now },
         });
+        await throwIfCashBalancesAreNegative(tx, accountId);
         return tx.transaction.findFirst({
           where: { id: transactionId },
-          select: {
-            id: true,
-            type: true,
-            amountMinor: true,
-            currency: true,
-            occurredAt: true,
-            note: true,
-            categoryId: true,
-            instrumentId: true,
-            investmentQuantity: true,
-            revokedAt: true,
-            createdAt: true,
-            updatedAt: true,
-          },
+          select: revokeSelect,
         });
       }
 
       if (existing.transferGroupId) {
+        const peerLegs = await tx.transaction.findMany({
+          where: {
+            transferGroupId: existing.transferGroupId,
+            deletedAt: null,
+            revokedAt: null,
+          },
+          select: { accountId: true },
+        });
+        const affectedAccountIds = [
+          ...new Set(peerLegs.map((l) => l.accountId).filter(Boolean)),
+        ].sort();
+
+        // Destination-account income leg can leave that book/wallet negative after spend.
+        await lockAccountsForNegativeCashGuard(tx, affectedAccountIds);
         await tx.transaction.updateMany({
           where: {
             transferGroupId: existing.transferGroupId,
@@ -706,22 +733,14 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
           },
           data: { revokedAt: now },
         });
+
+        for (const aid of affectedAccountIds) {
+          await throwIfCashBalancesAreNegative(tx, aid);
+        }
+
         return tx.transaction.findFirst({
           where: { id: transactionId },
-          select: {
-            id: true,
-            type: true,
-            amountMinor: true,
-            currency: true,
-            occurredAt: true,
-            note: true,
-            categoryId: true,
-            instrumentId: true,
-            investmentQuantity: true,
-            revokedAt: true,
-            createdAt: true,
-            updatedAt: true,
-          },
+          select: revokeSelect,
         });
       }
 
@@ -776,24 +795,23 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
         }
       }
 
-      return tx.transaction.update({
+      // Income (and cash-out income) revoke removes credits; expense/investment revoke cannot
+      // push piles negative. Lock before mutate so revoke cannot race past the cash lock.
+      if (existing.type === "INCOME") {
+        await lockAccountsForNegativeCashGuard(tx, [accountId]);
+      }
+
+      const revoked = await tx.transaction.update({
         where: { id: transactionId },
         data: { revokedAt: now },
-        select: {
-          id: true,
-          type: true,
-          amountMinor: true,
-          currency: true,
-          occurredAt: true,
-          note: true,
-          categoryId: true,
-          instrumentId: true,
-          investmentQuantity: true,
-          revokedAt: true,
-          createdAt: true,
-          updatedAt: true,
-        },
+        select: revokeSelect,
       });
+
+      if (existing.type === "INCOME") {
+        await throwIfCashBalancesAreNegative(tx, accountId);
+      }
+
+      return revoked;
     });
 
     await prisma.auditLog.create({
@@ -816,6 +834,9 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
       },
     });
   } catch (err) {
+    if (err && err.code === "NEGATIVE_CASH_BALANCE") {
+      return res.status(400).json({ error: err.message });
+    }
     next(err);
   }
 });
