@@ -1,5 +1,6 @@
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
+  throwIfInvestmentWouldCauseNegativeWalletBalance,
 } = require("./nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("./categoryMemberAccess");
 
@@ -119,6 +120,13 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
     if (category.lockedForManualEntry) throw new Error("BAD_INV_CATEGORY");
 
     await assertCategoryManualMemberAccess(tx, { accountId, userId, category });
+
+    await throwIfInvestmentWouldCauseNegativeWalletBalance(
+      tx,
+      accountId,
+      amountMinor,
+      walletId
+    );
 
     const txRow = await tx.transaction.create({
       data: {

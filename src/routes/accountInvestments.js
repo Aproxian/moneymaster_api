@@ -6,6 +6,9 @@ const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
 const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const {
+  throwIfInvestmentWouldCauseNegativeWalletBalance,
+} = require("../services/nonNegativeCashBalance");
 
 // Mounted at /accounts/:accountId/investments
 const accountInvestmentsRouter = Router({ mergeParams: true });
@@ -134,6 +137,13 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
     if (!occurredAt) occurredAt = new Date();
 
     const result = await prisma.$transaction(async (tx) => {
+      await throwIfInvestmentWouldCauseNegativeWalletBalance(
+        tx,
+        accountId,
+        body.amountMinor,
+        walletId
+      );
+
       const txRow = await tx.transaction.create({
         data: {
           accountId,
@@ -220,6 +230,9 @@ accountInvestmentsRouter.post("/", async (req, res, next) => {
 
     return res.status(201).json(result);
   } catch (err) {
+    if (err && err.code === "NEGATIVE_CASH_BALANCE") {
+      return res.status(400).json({ error: err.message });
+    }
     next(err);
   }
 });
