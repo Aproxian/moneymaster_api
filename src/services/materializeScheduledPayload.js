@@ -148,6 +148,9 @@ async function materializeScheduledPayload(tx, { accountId, userId, occurredAt, 
         categoryId: category.id,
         quantity: { increment: quantity },
         costBasisMinor: { increment: amountMinor },
+        // Unique is (accountId, instrumentId); a full cash-out only soft-deletes.
+        // Re-open the same row so the position is visible and cash-out-able again.
+        deletedAt: null,
       },
       create: {
         accountId,
