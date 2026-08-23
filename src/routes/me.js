@@ -10,6 +10,7 @@ const { getMaintenanceState, setMaintenanceState } = require("../services/global
 const { logApp } = require("../lib/fileLogger");
 const { syncNewMemberCategoryAccess } = require("../services/categoryMemberAccess");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
+const { removeMembershipOnUserDelete } = require("../lib/userDeleteMembership");
 const {
   MAX_ACCOUNTS_PER_USER,
   ACCOUNT_LIMIT_REACHED_MESSAGE,
@@ -469,39 +470,14 @@ meRouter.delete("/me", requireAuth, async (req, res, next) => {
     await prisma.$transaction(async (tx) => {
       const memberships = await tx.accountMember.findMany({
         where: { userId },
-        select: { accountId: true, role: true, joinedAt: true },
+        select: { accountId: true },
       });
 
       for (const m of memberships) {
-        const { accountId } = m;
-
-        const allMembers = await tx.accountMember.findMany({
-          where: { accountId },
-          select: { userId: true, role: true, joinedAt: true },
-          orderBy: { joinedAt: "asc" },
-        });
-
-        const others = allMembers.filter((x) => x.userId !== userId);
-
-        if (others.length === 0) {
-          await tx.account.update({
-            where: { id: accountId },
-            data: { deletedAt: now },
-          });
-        } else if (m.role === "OWNER") {
-          const successor = [...others].sort(
-            (a, b) => a.joinedAt.getTime() - b.joinedAt.getTime()
-          )[0];
-          await tx.accountMember.update({
-            where: {
-              userId_accountId: { userId: successor.userId, accountId },
-            },
-            data: { role: "OWNER" },
-          });
-        }
-
-        await tx.accountMember.delete({
-          where: { userId_accountId: { userId, accountId } },
+        await removeMembershipOnUserDelete(tx, {
+          userId,
+          accountId: m.accountId,
+          now,
         });
       }
 
