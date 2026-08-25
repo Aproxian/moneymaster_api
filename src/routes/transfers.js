@@ -6,6 +6,7 @@ const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
 const { requireAuth } = require("../middleware/auth");
+const { optionalCoercedDate } = require("../lib/zodDate");
 
 const transfersRouter = Router();
 
@@ -18,7 +19,7 @@ const createTransferSchema = z.object({
   amountMinor: z.number().int().positive(),
   // optional, required when currencies differ
   fxRate: z.number().positive().optional(),
-  occurredAt: z.coerce.date().optional(),
+  occurredAt: optionalCoercedDate,
   note: z.string().max(500).optional(),
   fromWalletId: z.string().min(1).optional(),
   toWalletId: z.string().min(1).optional(),
