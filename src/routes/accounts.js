@@ -26,6 +26,7 @@ const {
   countActiveAccountMemberships,
 } = require("../lib/accountLimits");
 const { normalizeTimeZone, isValidTimeZone } = require("../lib/timezone");
+const { applyFxToMinorUnits, isFxAmountError } = require("../lib/fxAmount");
 
 const accountsRouter = Router();
 
@@ -1137,12 +1138,16 @@ accountsRouter.post(
           },
         });
 
-        for (const t of txns) {
-          const converted = Math.round(t.amountMinor * fxRate);
+        const convertedRows = txns.map((t) => ({
+          id: t.id,
+          amountMinor: applyFxToMinorUnits(t.amountMinor, fxRate),
+        }));
+
+        for (const t of convertedRows) {
           await tx.transaction.update({
             where: { id: t.id },
             data: {
-              amountMinor: converted,
+              amountMinor: t.amountMinor,
               currency: newCurrency,
             },
           });
@@ -1193,6 +1198,9 @@ accountsRouter.post(
 
       return res.status(200).json(result);
     } catch (err) {
+      if (isFxAmountError(err)) {
+        return res.status(400).json({ error: err.message, code: err.code });
+      }
       next(err);
     }
   }

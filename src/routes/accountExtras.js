@@ -11,6 +11,7 @@ const { walletBalanceMinor } = require("../services/walletBalance");
 const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
+const { applyFxToMinorUnits, isFxAmountError } = require("../lib/fxAmount");
 
 const accountExtrasRouter = Router({ mergeParams: true });
 
@@ -706,7 +707,7 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
 
     const toAmountMinor = sameCurrency
       ? body.amountMinor
-      : Math.round(body.amountMinor * fxRate);
+      : applyFxToMinorUnits(body.amountMinor, fxRate);
 
     const result = await prisma.$transaction(async (tx) => {
       await throwIfExpenseWouldCauseNegativeCashBalance(
@@ -781,6 +782,9 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
   } catch (err) {
     if (err && err.code === "NEGATIVE_CASH_BALANCE") {
       return res.status(400).json({ error: err.message });
+    }
+    if (isFxAmountError(err)) {
+      return res.status(400).json({ error: err.message, code: err.code });
     }
     next(err);
   }
