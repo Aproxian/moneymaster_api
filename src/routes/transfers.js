@@ -6,6 +6,7 @@ const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
 const { requireAuth } = require("../middleware/auth");
+const { applyFxToMinorUnits, isFxAmountError } = require("../lib/fxAmount");
 
 const transfersRouter = Router();
 
@@ -92,6 +93,10 @@ transfersRouter.post("/", async (req, res, next) => {
       fxRate = null;
     }
 
+    const toAmountMinor = sameCurrency
+      ? body.amountMinor
+      : applyFxToMinorUnits(body.amountMinor, fxRate);
+
     const occurredAt = body.occurredAt ?? new Date();
 
     const [fromCategory, toCategory] = await Promise.all([
@@ -156,10 +161,6 @@ transfersRouter.post("/", async (req, res, next) => {
         body.amountMinor,
         body.fromWalletId ?? null
       );
-
-      const toAmountMinor = sameCurrency
-        ? body.amountMinor
-        : Math.round(body.amountMinor * fxRate);
 
       const transferGroup = await tx.transferGroup.create({
         data: {
@@ -230,6 +231,9 @@ transfersRouter.post("/", async (req, res, next) => {
   } catch (err) {
     if (err && err.code === "NEGATIVE_CASH_BALANCE") {
       return res.status(400).json({ error: err.message });
+    }
+    if (isFxAmountError(err)) {
+      return res.status(400).json({ error: err.message, code: err.code });
     }
     next(err);
   }
