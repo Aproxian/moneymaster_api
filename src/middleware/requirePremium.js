@@ -67,4 +67,8 @@ async function requirePremium(req, res, next) {
   }
 }
 
-module.exports = { requirePremium, isPremiumEnforcementEnabled: isEnforcementEnabled };
+module.exports = {
+  requirePremium,
+  hasActivePremium,
+  isPremiumEnforcementEnabled: isEnforcementEnabled,
+};
