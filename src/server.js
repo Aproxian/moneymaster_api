@@ -1,7 +1,10 @@
 const { app } = require("./app");
 const { config } = require("./config");
 const { logApp } = require("./lib/fileLogger");
-const { stopTwelveDataBackgroundSweep } = require("./services/twelveDataRefreshScheduler");
+const {
+  isLocalSweepRunnerActive,
+  stopTwelveDataBackgroundSweep,
+} = require("./services/twelveDataRefreshScheduler");
 
 const server = app.listen(config.port, () => {
   const msg = `API listening on http://localhost:${config.port}`;
@@ -10,7 +13,9 @@ const server = app.listen(config.port, () => {
 });
 
 async function shutdown() {
-  await stopTwelveDataBackgroundSweep();
+  if (isLocalSweepRunnerActive()) {
+    await stopTwelveDataBackgroundSweep();
+  }
   server.close(() => process.exit(0));
 }
 
