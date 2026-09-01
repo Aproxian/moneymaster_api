@@ -2,6 +2,9 @@ const fetch = require("node-fetch");
 
 const { prisma } = require("../prisma");
 const { logApp } = require("../lib/fileLogger");
+const {
+  cancelPendingInvestSchedulesForInstruments,
+} = require("../lib/investScheduleCancel");
 
 const TWELVEDATA_BASE_URL =
   process.env.TWELVEDATA_BASE_URL || "https://api.twelvedata.com";
@@ -147,9 +150,14 @@ async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
       where: { id: { in: ids } },
       data: { isActive: false },
     });
+    // Materialize rejects inactive instruments with BAD_INSTRUMENT and never
+    // advances nextRunAt; cancel matching invest schedules so they cannot starve
+    // the processor batch (and so re-activation cannot burst stale catch-up buys).
+    const cancelled = await cancelPendingInvestSchedulesForInstruments(prisma, ids);
     logApp("WARN", "TwelveData", "auto_deactivated_plan_restricted_symbols", {
       tickers: [...want],
       rowsUpdated: res.count,
+      investSchedulesCancelled: cancelled,
     });
   } catch (e) {
     logApp(
@@ -169,8 +177,12 @@ async function deactivateTwelveDataInstrumentById(instrumentId) {
       data: { isActive: false },
     });
     if (res.count > 0) {
+      const cancelled = await cancelPendingInvestSchedulesForInstruments(prisma, [
+        instrumentId,
+      ]);
       logApp("WARN", "TwelveData", "auto_deactivated_plan_restricted_instrument", {
         instrumentId,
+        investSchedulesCancelled: cancelled,
       });
     }
   } catch (e) {

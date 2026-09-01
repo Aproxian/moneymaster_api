@@ -5,6 +5,7 @@ const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
+const { requiredCoercedDate } = require("../lib/zodDate");
 
 const scheduledTransactionsRouter = Router({ mergeParams: true });
 
@@ -20,7 +21,7 @@ const schedulePayloadSchema = z.object({
 
 const createDelaySchema = z.object({
   kind: z.literal("DELAY_ONCE"),
-  executeAt: z.coerce.date(),
+  executeAt: requiredCoercedDate,
   payload: schedulePayloadSchema,
 });
 
@@ -29,7 +30,7 @@ const createRecurSchema = z.object({
   recurrenceUnit: z.enum(["HOUR", "DAY", "WEEK", "MONTH", "YEAR"]),
   intervalCount: z.number().int().min(1).max(3650),
   hourOfDay: z.number().int().min(0).max(23).optional().nullable(),
-  startAt: z.coerce.date(),
+  startAt: requiredCoercedDate,
   payload: schedulePayloadSchema,
 });
 
@@ -236,11 +237,11 @@ scheduledTransactionsRouter.post("/:scheduleId/cancel", async (req, res, next) =
 });
 
 const patchTimingDelaySchema = z.object({
-  executeAt: z.coerce.date(),
+  executeAt: requiredCoercedDate,
 });
 
 const patchTimingRecurringSchema = z.object({
-  nextRunAt: z.coerce.date(),
+  nextRunAt: requiredCoercedDate,
   hourOfDay: z.number().int().min(0).max(23).optional().nullable(),
 });
 
