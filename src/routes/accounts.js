@@ -129,6 +129,10 @@ const changeCurrencySchema = z.object({
   fxRate: z.number().positive(),
 });
 
+function convertMinorUnits(amountMinor, fxRate) {
+  return Math.round(amountMinor * fxRate);
+}
+
 accountsRouter.use(requireAuth);
 
 accountsRouter.get("/", async (req, res, next) => {
@@ -1138,12 +1142,32 @@ accountsRouter.post(
         });
 
         for (const t of txns) {
-          const converted = Math.round(t.amountMinor * fxRate);
+          const converted = convertMinorUnits(t.amountMinor, fxRate);
           await tx.transaction.update({
             where: { id: t.id },
             data: {
               amountMinor: converted,
               currency: newCurrency,
+            },
+          });
+        }
+
+        const holdings = await tx.holding.findMany({
+          where: {
+            accountId: account.id,
+            deletedAt: null,
+          },
+          select: {
+            id: true,
+            costBasisMinor: true,
+          },
+        });
+
+        for (const holding of holdings) {
+          await tx.holding.update({
+            where: { id: holding.id },
+            data: {
+              costBasisMinor: convertMinorUnits(holding.costBasisMinor, fxRate),
             },
           });
         }
@@ -1177,6 +1201,7 @@ accountsRouter.post(
               fxRate,
               accountId: account.id,
               affectedTransactions: txns.length,
+              affectedHoldings: holdings.length,
               currencyChangeId: currencyChange.id,
             },
           },
@@ -1188,6 +1213,7 @@ accountsRouter.post(
           newCurrency,
           fxRate,
           affectedTransactions: txns.length,
+          affectedHoldings: holdings.length,
         };
       });
 
@@ -1252,5 +1278,5 @@ accountsRouter.delete(
   }
 );
 
-module.exports = { accountsRouter };
+module.exports = { accountsRouter, convertMinorUnits };
 

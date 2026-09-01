@@ -88,6 +88,29 @@ const assignWalletsBulkSchema = z.object({
     .max(400),
 });
 
+async function userCanRevokeTransferGroup(tx, transferGroupId, userId) {
+  const groupAccounts = await tx.transaction.findMany({
+    where: {
+      transferGroupId,
+      deletedAt: null,
+    },
+    select: { accountId: true },
+    distinct: ["accountId"],
+  });
+
+  const accountIds = [...new Set(groupAccounts.map((row) => row.accountId))];
+  if (accountIds.length === 0) return false;
+
+  const membershipCount = await tx.accountMember.count({
+    where: {
+      userId,
+      accountId: { in: accountIds },
+    },
+  });
+
+  return membershipCount === accountIds.length;
+}
+
 transactionsRouter.use(requireAuth);
 transactionsRouter.use(requireAccountMember("accountId"));
 
@@ -698,6 +721,15 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
       }
 
       if (existing.transferGroupId) {
+        const canRevokeGroup = await userCanRevokeTransferGroup(
+          tx,
+          existing.transferGroupId,
+          userId
+        );
+        if (!canRevokeGroup) {
+          return { forbiddenTransferGroup: true };
+        }
+
         await tx.transaction.updateMany({
           where: {
             transferGroupId: existing.transferGroupId,
@@ -796,6 +828,12 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
       });
     });
 
+    if (updated?.forbiddenTransferGroup) {
+      return res.status(403).json({
+        error: "User must be a member of every account in this transfer to revoke it",
+      });
+    }
+
     await prisma.auditLog.create({
       data: {
         userId,
@@ -864,5 +902,5 @@ transactionsRouter.delete("/:transactionId", async (req, res, next) => {
   }
 });
 
-module.exports = { transactionsRouter };
+module.exports = { transactionsRouter, userCanRevokeTransferGroup };
 
