@@ -673,6 +673,37 @@ accountsRouter.patch(
       }
 
       if (body.completeWalletMigration) {
+        if (!existing.walletMigrationPending) {
+          return res.status(400).json({ error: "No wallet migration is pending for this account" });
+        }
+
+        const [walletCount, unassignedCount] = await Promise.all([
+          prisma.accountWallet.count({
+            where: { accountId, deletedAt: null },
+          }),
+          prisma.transaction.count({
+            where: {
+              accountId,
+              deletedAt: null,
+              revokedAt: null,
+              walletId: null,
+            },
+          }),
+        ]);
+
+        if (walletCount === 0) {
+          return res.status(400).json({
+            error: "At least one wallet is required before completing wallet migration",
+          });
+        }
+
+        if (unassignedCount > 0) {
+          return res.status(400).json({
+            error: "Assign all active transactions to wallets before completing wallet migration",
+            unassignedCount,
+          });
+        }
+
         await prisma.$transaction(async (tx) => {
           await tx.account.update({
             where: { id: accountId },
