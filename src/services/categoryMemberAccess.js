@@ -50,6 +50,16 @@ function canConfigureCategoryMemberAccess({ isPersonal, category, primaryOwnerUs
   return category.createdByUserId === userId;
 }
 
+function canToggleCategoryManualLock({ isPersonal, category, primaryOwnerUserId, userId }) {
+  if (!category) return false;
+  if (isTransferOrCashoutInternalKey(category.internalKey)) return false;
+  if (isPersonal) return true;
+  if (isMasterOwnedCategory(category, primaryOwnerUserId)) {
+    return userId === primaryOwnerUserId;
+  }
+  return category.createdByUserId === userId;
+}
+
 function computeManualEntryAllowedForMe({
   category,
   isPersonal,
@@ -238,6 +248,7 @@ module.exports = {
   accountIsPersonalForUser,
   isMasterOwnedCategory,
   canConfigureCategoryMemberAccess,
+  canToggleCategoryManualLock,
   computeManualEntryAllowedForMe,
   assertCategoryManualMemberAccess,
   syncNewMemberCategoryAccess,

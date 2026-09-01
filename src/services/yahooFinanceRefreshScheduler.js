@@ -368,14 +368,18 @@ async function startYahooFinanceBackgroundSweep(options = {}) {
         const instrumentsCount = result.instrumentsCount;
         const auditUid = sweepAuditUserId;
         await stopYahooFinanceBackgroundSweep();
-        try {
-          const day = calendarDateInSweepTimezone();
-          await prisma.twelveDataQuoteRefreshState.updateMany({
-            where: { id: YAHOO_STATE_ID },
-            data: { lastBackgroundSweepCompletedDate: day },
-          });
-        } catch (persistErr) {
-          sweepLog("error", "lastBackgroundSweepCompletedDate update failed", persistErr);
+        if (instrumentsCount === 0 || quotesCreatedTotal > 0) {
+          try {
+            const day = calendarDateInSweepTimezone();
+            await prisma.twelveDataQuoteRefreshState.updateMany({
+              where: { id: YAHOO_STATE_ID },
+              data: { lastBackgroundSweepCompletedDate: day },
+            });
+          } catch (persistErr) {
+            sweepLog("error", "lastBackgroundSweepCompletedDate update failed", persistErr);
+          }
+        } else {
+          sweepLog("warn", "not marking sweep complete because no quotes were refreshed");
         }
         try {
           await prisma.auditLog.create({

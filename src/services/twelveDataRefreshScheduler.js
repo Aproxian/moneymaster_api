@@ -369,6 +369,7 @@ async function startTwelveDataBackgroundSweep(options) {
     if (rateLimitCooldownUntil > 0 && Date.now() < rateLimitCooldownUntil) {
       const remainingS = Math.ceil((rateLimitCooldownUntil - Date.now()) / 1000);
       sweepLog("info", `rate-limit cooldown active — skipping tick (${remainingS}s remaining)`);
+      await touchSweepHeartbeat();
       return;
     }
     if (rateLimitCooldownUntil > 0 && Date.now() >= rateLimitCooldownUntil) {
@@ -436,14 +437,18 @@ async function startTwelveDataBackgroundSweep(options) {
         const instrumentsCount = result.instrumentsCount;
         const auditUid = sweepAuditUserId;
         await stopTwelveDataBackgroundSweep();
-        try {
-          const day = calendarDateInSweepTimezone();
-          await prisma.twelveDataQuoteRefreshState.updateMany({
-            where: { id: TWELVEDATA_STATE_ID },
-            data: { lastBackgroundSweepCompletedDate: day },
-          });
-        } catch (persistErr) {
-          sweepLog("error", "lastBackgroundSweepCompletedDate update failed", persistErr);
+        if (instrumentsCount === 0 || quotesCreatedTotal > 0) {
+          try {
+            const day = calendarDateInSweepTimezone();
+            await prisma.twelveDataQuoteRefreshState.updateMany({
+              where: { id: TWELVEDATA_STATE_ID },
+              data: { lastBackgroundSweepCompletedDate: day },
+            });
+          } catch (persistErr) {
+            sweepLog("error", "lastBackgroundSweepCompletedDate update failed", persistErr);
+          }
+        } else {
+          sweepLog("warn", "not marking sweep complete because no quotes were refreshed");
         }
         try {
           await prisma.auditLog.create({
