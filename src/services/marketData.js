@@ -139,9 +139,27 @@ async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
       where: { provider: "TWELVEDATA", isActive: true },
       select: { id: true, providerSymbol: true },
     });
-    const ids = rows
-      .filter((r) => want.has(sanitizeTwelveDataSymbol(r.providerSymbol).toUpperCase()))
-      .map((r) => r.id);
+    const idsByTicker = new Map();
+    for (const row of rows) {
+      const ticker = sanitizeTwelveDataSymbol(row.providerSymbol).toUpperCase();
+      if (!want.has(ticker)) continue;
+      if (!idsByTicker.has(ticker)) idsByTicker.set(ticker, []);
+      idsByTicker.get(ticker).push(row.id);
+    }
+    const ids = [];
+    const skippedAmbiguousTickers = [];
+    for (const [ticker, tickerIds] of idsByTicker) {
+      if (tickerIds.length === 1) {
+        ids.push(tickerIds[0]);
+      } else {
+        skippedAmbiguousTickers.push(ticker);
+      }
+    }
+    if (skippedAmbiguousTickers.length > 0) {
+      logApp("WARN", "TwelveData", "auto_deactivate_skipped_ambiguous_tickers", {
+        tickers: skippedAmbiguousTickers,
+      });
+    }
     if (ids.length === 0) return;
     const res = await prisma.instrument.updateMany({
       where: { id: { in: ids } },
@@ -319,6 +337,11 @@ function venueGroupKey(exchangeRaw) {
   if (v.mic_code) return `mic:${v.mic_code}`;
   if (v.exchange) return `ex:${v.exchange}`;
   return "none";
+}
+
+function canUseUnifiedSymbolOnlyQuote(instrument) {
+  const venue = venueQueryParams(instrument.exchange);
+  return !venue.exchange && !venue.mic_code;
 }
 
 function parseTimeSeriesPayload(data, now) {
@@ -615,6 +638,7 @@ async function fetchTwelveDataPrices(instruments, options = {}) {
     try {
       const bySym = await fetchTwelveDataTimeSeriesBatch(symbols, {}, {});
       for (const inst of toFetch) {
+        if (!canUseUnifiedSymbolOnlyQuote(inst)) continue;
         const su = sanitizeTwelveDataSymbol(inst.providerSymbol).toUpperCase();
         const hit = bySym.get(su) || bySym.get(inst.providerSymbol);
         if (hit) result[inst.id] = hit;

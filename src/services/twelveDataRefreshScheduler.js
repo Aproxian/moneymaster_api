@@ -436,14 +436,20 @@ async function startTwelveDataBackgroundSweep(options) {
         const instrumentsCount = result.instrumentsCount;
         const auditUid = sweepAuditUserId;
         await stopTwelveDataBackgroundSweep();
-        try {
-          const day = calendarDateInSweepTimezone();
-          await prisma.twelveDataQuoteRefreshState.updateMany({
-            where: { id: TWELVEDATA_STATE_ID },
-            data: { lastBackgroundSweepCompletedDate: day },
+        if (quotesCreatedTotal > 0) {
+          try {
+            const day = calendarDateInSweepTimezone();
+            await prisma.twelveDataQuoteRefreshState.updateMany({
+              where: { id: TWELVEDATA_STATE_ID },
+              data: { lastBackgroundSweepCompletedDate: day },
+            });
+          } catch (persistErr) {
+            sweepLog("error", "lastBackgroundSweepCompletedDate update failed", persistErr);
+          }
+        } else {
+          sweepLog("warn", "full sweep ended with zero quotes; not marking day complete", {
+            instrumentsCount,
           });
-        } catch (persistErr) {
-          sweepLog("error", "lastBackgroundSweepCompletedDate update failed", persistErr);
         }
         try {
           await prisma.auditLog.create({
