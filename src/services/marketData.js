@@ -125,9 +125,6 @@ function autoDeactivatePlanRestrictedSymbolsEnabled() {
   return !String(process.env.TWELVEDATA_AUTO_DEACTIVATE_PLAN_SYMBOLS ?? "1").match(/^(0|false|off)$/i);
 }
 
-/**
- * @param {Set<string> | string[]} tickerUppers sanitized upper tickers (e.g. TTM)
- */
 async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
   if (!autoDeactivatePlanRestrictedSymbolsEnabled()) return;
   const want = new Set(
@@ -137,20 +134,48 @@ async function deactivateTwelveDataInstrumentsByTickerUppers(tickerUppers) {
   try {
     const rows = await prisma.instrument.findMany({
       where: { provider: "TWELVEDATA", isActive: true },
-      select: { id: true, providerSymbol: true },
+      select: { id: true, providerSymbol: true, exchange: true },
     });
-    const ids = rows
-      .filter((r) => want.has(sanitizeTwelveDataSymbol(r.providerSymbol).toUpperCase()))
-      .map((r) => r.id);
-    if (ids.length === 0) return;
-    const res = await prisma.instrument.updateMany({
-      where: { id: { in: ids } },
-      data: { isActive: false },
-    });
-    logApp("WARN", "TwelveData", "auto_deactivated_plan_restricted_symbols", {
-      tickers: [...want],
-      rowsUpdated: res.count,
-    });
+    const matchesByTicker = new Map();
+    for (const row of rows) {
+      const ticker = sanitizeTwelveDataSymbol(row.providerSymbol).toUpperCase();
+      if (!want.has(ticker)) continue;
+      if (!matchesByTicker.has(ticker)) matchesByTicker.set(ticker, []);
+      matchesByTicker.get(ticker).push(row);
+    }
+
+    const ids = [];
+    const ambiguous = [];
+    for (const [ticker, matches] of matchesByTicker) {
+      if (matches.length === 1) {
+        ids.push(matches[0].id);
+      } else {
+        ambiguous.push({
+          ticker,
+          instruments: matches.map((r) => ({
+            id: r.id,
+            providerSymbol: r.providerSymbol,
+            exchange: r.exchange,
+          })),
+        });
+      }
+    }
+
+    let rowsUpdated = 0;
+    if (ids.length > 0) {
+      const res = await prisma.instrument.updateMany({
+        where: { id: { in: ids } },
+        data: { isActive: false },
+      });
+      rowsUpdated = res.count;
+    }
+    if (rowsUpdated > 0 || ambiguous.length > 0) {
+      logApp("WARN", "TwelveData", "auto_deactivated_plan_restricted_symbols", {
+        tickers: [...want],
+        rowsUpdated,
+        ambiguousSkipped: ambiguous,
+      });
+    }
   } catch (e) {
     logApp(
       "ERROR",

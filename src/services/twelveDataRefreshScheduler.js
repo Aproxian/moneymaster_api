@@ -361,6 +361,7 @@ async function startTwelveDataBackgroundSweep(options) {
 
     if (sweepBusy) {
       sweepLog("warn", "previous tick still running; skipping this interval");
+      await touchSweepHeartbeat();
       return;
     }
 
@@ -369,6 +370,7 @@ async function startTwelveDataBackgroundSweep(options) {
     if (rateLimitCooldownUntil > 0 && Date.now() < rateLimitCooldownUntil) {
       const remainingS = Math.ceil((rateLimitCooldownUntil - Date.now()) / 1000);
       sweepLog("info", `rate-limit cooldown active — skipping tick (${remainingS}s remaining)`);
+      await touchSweepHeartbeat();
       return;
     }
     if (rateLimitCooldownUntil > 0 && Date.now() >= rateLimitCooldownUntil) {
