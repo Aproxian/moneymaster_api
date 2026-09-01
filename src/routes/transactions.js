@@ -665,6 +665,31 @@ transactionsRouter.post("/:transactionId/revoke", async (req, res, next) => {
       return res.status(400).json({ error: "Transaction is already revoked" });
     }
 
+    if (existing.transferGroupId) {
+      const affectedAccounts = await prisma.transaction.findMany({
+        where: {
+          transferGroupId: existing.transferGroupId,
+          deletedAt: null,
+          revokedAt: null,
+        },
+        distinct: ["accountId"],
+        select: { accountId: true },
+      });
+      const affectedAccountIds = affectedAccounts.map((row) => row.accountId);
+      const memberCount = await prisma.accountMember.count({
+        where: {
+          userId,
+          accountId: { in: affectedAccountIds },
+        },
+      });
+
+      if (memberCount !== affectedAccountIds.length) {
+        return res.status(403).json({
+          error: "You must be a member of every account in this transfer to revoke it",
+        });
+      }
+    }
+
     const updated = await prisma.$transaction(async (tx) => {
       const now = new Date();
 

@@ -40,11 +40,11 @@ transfersRouter.post("/", async (req, res, next) => {
     const [fromAccount, toAccount] = await Promise.all([
       prisma.account.findFirst({
         where: { id: body.fromAccountId, deletedAt: null },
-        select: { id: true, currency: true, walletsEnabled: true },
+        select: { id: true, currency: true, walletsEnabled: true, walletMigrationPending: true },
       }),
       prisma.account.findFirst({
         where: { id: body.toAccountId, deletedAt: null },
-        select: { id: true, currency: true, walletsEnabled: true },
+        select: { id: true, currency: true, walletsEnabled: true, walletMigrationPending: true },
       }),
     ]);
 
@@ -127,26 +127,33 @@ transfersRouter.post("/", async (req, res, next) => {
       });
     }
 
-    if (body.fromWalletId) {
-      if (!fromAccount.walletsEnabled) {
-        return res.status(400).json({ error: "fromWalletId requires wallets on the source account" });
+    const fromWalletsLive = fromAccount.walletsEnabled || fromAccount.walletMigrationPending;
+    const toWalletsLive = toAccount.walletsEnabled || toAccount.walletMigrationPending;
+
+    if (fromWalletsLive) {
+      if (!body.fromWalletId) {
+        return res.status(400).json({ error: "fromWalletId is required when the source account uses wallets" });
       }
       const w = await prisma.accountWallet.findFirst({
         where: { id: body.fromWalletId, accountId: fromAccount.id, deletedAt: null },
         select: { id: true },
       });
       if (!w) return res.status(400).json({ error: "Invalid fromWalletId" });
+    } else if (body.fromWalletId) {
+      return res.status(400).json({ error: "fromWalletId is only valid when source has wallets enabled" });
     }
 
-    if (body.toWalletId) {
-      if (!toAccount.walletsEnabled) {
-        return res.status(400).json({ error: "toWalletId requires wallets on the destination account" });
+    if (toWalletsLive) {
+      if (!body.toWalletId) {
+        return res.status(400).json({ error: "toWalletId is required when the destination account uses wallets" });
       }
       const w = await prisma.accountWallet.findFirst({
         where: { id: body.toWalletId, accountId: toAccount.id, deletedAt: null },
         select: { id: true },
       });
       if (!w) return res.status(400).json({ error: "Invalid toWalletId" });
+    } else if (body.toWalletId) {
+      return res.status(400).json({ error: "toWalletId is only valid when destination has wallets enabled" });
     }
 
     const result = await prisma.$transaction(async (tx) => {

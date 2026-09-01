@@ -554,7 +554,7 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
 
     const fromAccount = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { id: true, currency: true, walletsEnabled: true },
+      select: { id: true, currency: true, walletsEnabled: true, walletMigrationPending: true },
     });
     if (!fromAccount) return res.status(404).json({ error: "Account not found" });
 
@@ -562,7 +562,7 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
     const note = body.note ?? null;
 
     if (body.kind === "WALLET") {
-      if (!fromAccount.walletsEnabled) {
+      if (!fromAccount.walletsEnabled && !fromAccount.walletMigrationPending) {
         return res.status(400).json({ error: "Wallets are not enabled for this account" });
       }
       if (body.fromWalletId === body.toWalletId) {
@@ -657,7 +657,7 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
 
     const toAccount = await prisma.account.findFirst({
       where: { id: body.toAccountId, deletedAt: null },
-      select: { id: true, currency: true, walletsEnabled: true },
+      select: { id: true, currency: true, walletsEnabled: true, walletMigrationPending: true },
     });
     if (!toAccount) return res.status(404).json({ error: "Destination account not found" });
 
@@ -676,7 +676,10 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
     }
     if (sameCurrency) fxRate = null;
 
-    if (fromAccount.walletsEnabled) {
+    const fromWalletsLive = fromAccount.walletsEnabled || fromAccount.walletMigrationPending;
+    const toWalletsLive = toAccount.walletsEnabled || toAccount.walletMigrationPending;
+
+    if (fromWalletsLive) {
       if (!body.fromWalletId) {
         return res.status(400).json({ error: "fromWalletId is required when this account uses wallets" });
       }
@@ -689,7 +692,7 @@ accountExtrasRouter.post("/transfer", async (req, res, next) => {
       return res.status(400).json({ error: "fromWalletId is only valid when wallets are enabled" });
     }
 
-    if (toAccount.walletsEnabled) {
+    if (toWalletsLive) {
       if (!body.toWalletId) {
         return res.status(400).json({
           error: "toWalletId is required when the destination account uses wallets",
