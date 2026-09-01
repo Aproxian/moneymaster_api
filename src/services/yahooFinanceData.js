@@ -221,4 +221,6 @@ module.exports = {
   refreshDailyQuotesForYahooFinanceChunked,
   /** @returns {number} max instruments per sweep tick */
   getYahooFinanceSymbolsPerTick: () => SYMBOLS_PER_TICK,
+  /** @returns {number} per-symbol Yahoo Finance request timeout in ms */
+  getYahooFinanceRequestTimeoutMs: () => REQUEST_TIMEOUT_MS,
 };
