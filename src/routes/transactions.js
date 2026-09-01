@@ -571,65 +571,65 @@ transactionsRouter.post("/", async (req, res, next) => {
     }
     if (!occurredAt) occurredAt = new Date();
 
-    if (body.type === "EXPENSE") {
-      try {
+    const tx = await prisma.$transaction(async (db) => {
+      if (body.type === "EXPENSE") {
         await throwIfExpenseWouldCauseNegativeCashBalance(
-          prisma,
+          db,
           accountId,
           body.amountMinor,
           walletId
         );
-      } catch (e) {
-        if (e && e.code === "NEGATIVE_CASH_BALANCE") {
-          return res.status(400).json({ error: e.message });
-        }
-        throw e;
       }
-    }
 
-    const tx = await prisma.transaction.create({
-      data: {
-        accountId,
-        type: body.type,
-        amountMinor: body.amountMinor,
-        currency,
-        occurredAt,
-        note: body.note ?? null,
-        categoryId: body.categoryId,
-        createdByUserId: userId,
-        walletId,
-      },
-      select: {
-        id: true,
-        type: true,
-        amountMinor: true,
-        currency: true,
-        occurredAt: true,
-        note: true,
-        categoryId: true,
-        walletId: true,
-        revokedAt: true,
-        createdAt: true,
-      },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: "CREATE",
-        entity: "Transaction",
-        entityId: tx.id,
-        meta: {
+      const created = await db.transaction.create({
+        data: {
           accountId,
-          type: tx.type,
-          amountMinor: tx.amountMinor,
-          currency: tx.currency,
+          type: body.type,
+          amountMinor: body.amountMinor,
+          currency,
+          occurredAt,
+          note: body.note ?? null,
+          categoryId: body.categoryId,
+          createdByUserId: userId,
+          walletId,
         },
-      },
+        select: {
+          id: true,
+          type: true,
+          amountMinor: true,
+          currency: true,
+          occurredAt: true,
+          note: true,
+          categoryId: true,
+          walletId: true,
+          revokedAt: true,
+          createdAt: true,
+        },
+      });
+
+      await db.auditLog.create({
+        data: {
+          userId,
+          action: "CREATE",
+          entity: "Transaction",
+          entityId: created.id,
+          meta: {
+            accountId,
+            type: created.type,
+            amountMinor: created.amountMinor,
+            currency: created.currency,
+          },
+        },
+      });
+
+      return created;
     });
 
     return res.status(201).json({ transaction: tx });
   } catch (err) {
+    if (err && err.code === "NEGATIVE_CASH_BALANCE") {
+      return res.status(400).json({ error: err.message });
+    }
     next(err);
   }
 });

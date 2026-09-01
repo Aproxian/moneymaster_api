@@ -1,4 +1,12 @@
+const { Prisma } = require("@prisma/client");
+
 const { walletBalanceMinor } = require("./walletBalance");
+
+async function lockAccountForCashBalanceCheck(db, accountId) {
+  await db.$queryRaw(
+    Prisma.sql`SELECT id FROM \`Account\` WHERE id = ${accountId} FOR UPDATE`
+  );
+}
 
 /**
  * Cash balance matches dashboard overview: sum(INCOME) − sum(EXPENSE), non-revoked rows only.
@@ -53,6 +61,8 @@ async function throwIfExpenseWouldCauseNegativeCashBalance(
     },
   });
   if (!account?.preventNegativeCashBalance) return;
+
+  await lockAccountForCashBalanceCheck(db, accountId);
 
   const bal = await getAccountCashBalanceMinor(db, accountId);
   if (bal - expenseAmountMinor < 0) {
