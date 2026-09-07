@@ -5,6 +5,7 @@ const { prisma } = require("../prisma");
 const { requireAuth } = require("../middleware/auth");
 const { requireAccountMember } = require("../middleware/requireAccountMember");
 const { CASH_OUT_INVESTMENT } = require("../lib/investmentCategoryKeys");
+const { holdingAfterCashOut } = require("../lib/holdingAfterCashOut");
 const { getPrimaryOwnerUserId } = require("../services/categoryMemberAccess");
 const { ensureInvestmentCategories } = require("../services/investingCategories");
 
@@ -233,12 +234,11 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
         throw err;
       }
 
-      const costBasis = holding.costBasisMinor;
-      const costRemoved = Math.round(
-        costBasis * (body.quantitySold / qtyHeld)
-      );
-      const newCost = Math.max(0, costBasis - costRemoved);
-      const newQty = qtyHeld - body.quantitySold;
+      const nextHolding = holdingAfterCashOut({
+        quantityHeld: qtyHeld,
+        costBasisMinor: holding.costBasisMinor,
+        quantitySold: body.quantitySold,
+      });
 
       const income = await tx.transaction.create({
         data: {
@@ -266,7 +266,7 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
         },
       });
 
-      if (newQty < 1e-12 || newCost <= 0) {
+      if (nextHolding.closed) {
         await tx.holding.update({
           where: { id: holding.id },
           data: {
@@ -279,8 +279,8 @@ accountInstrumentsRouter.post("/:instrumentId/cash-out", async (req, res, next) 
         await tx.holding.update({
           where: { id: holding.id },
           data: {
-            quantity: newQty,
-            costBasisMinor: newCost,
+            quantity: nextHolding.quantity,
+            costBasisMinor: nextHolding.costBasisMinor,
           },
         });
       }
