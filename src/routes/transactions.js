@@ -6,7 +6,7 @@ const {
   throwIfExpenseWouldCauseNegativeCashBalance,
 } = require("../services/nonNegativeCashBalance");
 const { assertCategoryManualMemberAccess } = require("../services/categoryMemberAccess");
-const { ymdToZonedNoonUtc } = require("../lib/timezone");
+const { ymdToZonedNoonUtc, parseOccurredRangeBound } = require("../lib/timezone");
 
 /**
  * @param {string} accountId
@@ -104,7 +104,7 @@ transactionsRouter.get("/", async (req, res, next) => {
 
     const account = await prisma.account.findFirst({
       where: { id: accountId, deletedAt: null },
-      select: { walletsEnabled: true, walletMigrationPending: true },
+      select: { walletsEnabled: true, walletMigrationPending: true, timezone: true },
     });
     if (!account) return res.status(404).json({ error: "Account not found" });
 
@@ -179,20 +179,16 @@ transactionsRouter.get("/", async (req, res, next) => {
       categoryIdFilter = categoryIdRaw;
     }
 
-    const fromParam = req.query.from;
-    const toParam = req.query.to;
-    const from =
-      typeof fromParam === "string" && fromParam
-        ? new Date(fromParam)
-        : undefined;
-    const to =
-      typeof toParam === "string" && toParam ? new Date(toParam) : undefined;
-    if (from && isNaN(from.getTime())) {
-      return res.status(400).json({ error: "Invalid from date" });
+    const parsedFrom = parseOccurredRangeBound(req.query.from, account.timezone, "from");
+    if (parsedFrom.error) {
+      return res.status(400).json({ error: parsedFrom.error });
     }
-    if (to && isNaN(to.getTime())) {
-      return res.status(400).json({ error: "Invalid to date" });
+    const parsedTo = parseOccurredRangeBound(req.query.to, account.timezone, "to");
+    if (parsedTo.error) {
+      return res.status(400).json({ error: parsedTo.error });
     }
+    const from = parsedFrom.date;
+    const to = parsedTo.date;
 
     const where = {
       accountId,

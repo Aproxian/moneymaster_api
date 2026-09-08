@@ -72,22 +72,126 @@ function offsetMinutesAt(utcDate, timeZone) {
 }
 
 /**
+ * Parse YYYY-MM-DD into calendar parts, rejecting overflow dates (Feb 31, non-leap Feb 29).
+ * @param {unknown} ymd
+ * @returns {{ y: number, m: number, d: number } | null}
+ */
+function parseYmd(ymd) {
+  if (typeof ymd !== "string" || !YMD_RE.test(ymd.trim())) return null;
+  const [y, m, d] = ymd.trim().split("-").map(Number);
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return null;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const probe = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  if (
+    probe.getUTCFullYear() !== y ||
+    probe.getUTCMonth() !== m - 1 ||
+    probe.getUTCDate() !== d
+  ) {
+    return null;
+  }
+  return { y, m, d };
+}
+
+/**
+ * Convert a local wall-clock reading on a real calendar date to a UTC instant.
+ * Two-pass offset correction so midnight/DST edges converge.
+ * @param {number} y
+ * @param {number} m
+ * @param {number} d
+ * @param {number} hour
+ * @param {number} minute
+ * @param {number} second
+ * @param {number} ms
+ * @param {string} timeZone
+ * @returns {Date}
+ */
+function zonedWallClockToUtc(y, m, d, hour, minute, second, ms, timeZone) {
+  const tz = normalizeTimeZone(timeZone);
+  const asIfUtc = Date.UTC(y, m - 1, d, hour, minute, second, ms);
+  const offset1 = offsetMinutesAt(new Date(asIfUtc), tz);
+  const first = asIfUtc - offset1 * 60000;
+  const offset2 = offsetMinutesAt(new Date(first), tz);
+  if (offset1 === offset2) return new Date(first);
+  return new Date(asIfUtc - offset2 * 60000);
+}
+
+/**
  * Convert a calendar date ("YYYY-MM-DD") to the UTC instant of noon local time
  * in `timeZone` on that date.
  * @param {string} ymd
  * @param {string} timeZone
- * @returns {Date|null} null when `ymd` is malformed
+ * @returns {Date|null} null when `ymd` is malformed or not a real calendar date
  */
 function ymdToZonedNoonUtc(ymd, timeZone) {
-  if (typeof ymd !== "string" || !YMD_RE.test(ymd.trim())) return null;
-  const [y, m, d] = ymd.trim().split("-").map(Number);
-  if (!y || !m || !d || m < 1 || m > 12 || d < 1 || d > 31) return null;
-  const tz = normalizeTimeZone(timeZone);
-  // First guess: treat noon wall-clock as if UTC, then correct by the zone offset
-  // measured at that guessed instant (DST-safe for anything but the rare noon-DST edge).
-  const guess = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
-  const offset = offsetMinutesAt(guess, tz);
-  return new Date(guess.getTime() - offset * 60000);
+  const parts = parseYmd(ymd);
+  if (!parts) return null;
+  return zonedWallClockToUtc(parts.y, parts.m, parts.d, 12, 0, 0, 0, timeZone);
+}
+
+/**
+ * Inclusive start of the local calendar day (00:00:00.000 in `timeZone`).
+ * @param {string} ymd
+ * @param {string} timeZone
+ * @returns {Date|null}
+ */
+function startOfZonedDayUtc(ymd, timeZone) {
+  const parts = parseYmd(ymd);
+  if (!parts) return null;
+  return zonedWallClockToUtc(parts.y, parts.m, parts.d, 0, 0, 0, 0, timeZone);
+}
+
+/**
+ * Inclusive end of the local calendar day (last millisecond before the next local midnight).
+ * @param {string} ymd
+ * @param {string} timeZone
+ * @returns {Date|null}
+ */
+function endOfZonedDayUtc(ymd, timeZone) {
+  const parts = parseYmd(ymd);
+  if (!parts) return null;
+  const next = new Date(Date.UTC(parts.y, parts.m - 1, parts.d + 1, 12, 0, 0));
+  const nextStart = zonedWallClockToUtc(
+    next.getUTCFullYear(),
+    next.getUTCMonth() + 1,
+    next.getUTCDate(),
+    0,
+    0,
+    0,
+    0,
+    timeZone
+  );
+  return new Date(nextStart.getTime() - 1);
+}
+
+/**
+ * Parse overview/list `from`/`to` query bounds.
+ *
+ * Date-only `YYYY-MM-DD` is a calendar day in `timeZone` (start of day for `from`,
+ * end of day for `to`) so noon-anchored backdated rows are included. Other parseable
+ * strings stay absolute instants (`new Date`), matching the previous contract.
+ *
+ * @param {unknown} raw
+ * @param {string} timeZone
+ * @param {"from" | "to"} side
+ * @returns {{ date: Date | undefined, error: string | null }}
+ */
+function parseOccurredRangeBound(raw, timeZone, side) {
+  if (typeof raw !== "string" || !raw.trim()) {
+    return { date: undefined, error: null };
+  }
+  const s = raw.trim();
+  if (YMD_RE.test(s)) {
+    const date = side === "from" ? startOfZonedDayUtc(s, timeZone) : endOfZonedDayUtc(s, timeZone);
+    if (!date || Number.isNaN(date.getTime())) {
+      return { date: undefined, error: `Invalid ${side} date` };
+    }
+    return { date, error: null };
+  }
+  const date = new Date(s);
+  if (Number.isNaN(date.getTime())) {
+    return { date: undefined, error: `Invalid ${side} date` };
+  }
+  return { date, error: null };
 }
 
 module.exports = {
@@ -95,4 +199,7 @@ module.exports = {
   isValidTimeZone,
   normalizeTimeZone,
   ymdToZonedNoonUtc,
+  startOfZonedDayUtc,
+  endOfZonedDayUtc,
+  parseOccurredRangeBound,
 };
